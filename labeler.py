@@ -107,7 +107,21 @@ def seg_cross(p1, p2, p3, p4):
     return _orient(p3, p4, p1) * _orient(p3, p4, p2) < 0 and _orient(p1, p2, p3) * _orient(p1, p2, p4) < 0
 
 
+_FACES = {}
+
+
 def find_faces(pts, lines):
+    """_find_faces 의 캐시판. 클릭할 때마다 5단계를 전부 다시 계산하지 않고, 바뀐 단계만 계산한다.
+    반환값은 공유되므로 호출하는 쪽에서 수정하면 안 된다."""
+    key = (tuple(map(tuple, pts)), tuple(map(tuple, lines)))
+    if key not in _FACES:
+        if len(_FACES) > 512:
+            _FACES.clear()
+        _FACES[key] = _find_faces(pts, lines)
+    return _FACES[key]
+
+
+def _find_faces(pts, lines):
     """선으로 둘러싸인 모든 닫힌 영역(면)을 찾는다. 점 하나에 선이 여러 개 붙어도(이미 닫은 영역의 점에서
     다른 점으로 다시 연결해도) 각각의 영역이 만들어진다. 선끼리 교차하지 않는다는 전제(평면 그래프).
     반환: (영역들[각 영역은 [x, y] 목록], 영역이 되지 못한 연결 덩어리 수)."""
@@ -198,13 +212,29 @@ def cmp_text(st):
             f"겹침 IoU {pct(inter / union) if union else '-'} · 내 파손 중 박스 안 비율 {pct(inter / a.sum()) if a.any() else '-'}")
 
 
-def draw_edit(image, st):
-    """5종 결과를 한 화면에 그림. 현재 단계는 진하게(점 번호 표시), 나머지 단계는 흐리게.
-    표시용으로 줄인 이미지 위에 그리며, 점/선 좌표(원본 기준)에 배율을 곱해 위치를 맞춘다."""
+_BASE = {}
+
+
+def _base_img(image):
+    """표시용으로 줄인 RGBA 이미지를 이미지마다 한 번만 만든다 (image 자체를 값에 함께 보관해 id 재사용을 막는다)."""
+    hit = _BASE.get(id(image))
+    if hit and hit[0] is image:
+        return hit[1]
     s_ = edit_scale(image)
     img = Image.fromarray(image).convert("RGBA")
     if s_ < 1:
         img = img.resize((round(img.width * s_), round(img.height * s_)), Image.BILINEAR)
+    if len(_BASE) >= 3:
+        _BASE.clear()
+    _BASE[id(image)] = (image, img)
+    return img
+
+
+def draw_edit(image, st):
+    """5종 결과를 한 화면에 그림. 현재 단계는 진하게(점 번호 표시), 나머지 단계는 흐리게.
+    표시용으로 줄인 이미지 위에 그리며, 점/선 좌표(원본 기준)에 배율을 곱해 위치를 맞춘다."""
+    s_ = edit_scale(image)
+    img = _base_img(image)  # 합성은 새 이미지를 돌려주므로 캐시된 원본은 바뀌지 않는다
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     lw = max(2, min(img.size) // 250)
