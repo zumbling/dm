@@ -140,7 +140,16 @@ def index(required):
     return sorted(n for n in have if _in_range(n)), done
 
 
+_pull_lock = threading.Lock()
+
+
 def pull(num):
+    """라벨링·파손비교 두 탭이 동시에 같은 번호를 열어도 같은 임시 파일을 서로 덮어쓰지 않게 한 번에 하나씩 받는다."""
+    with _pull_lock:
+        _pull(num)
+
+
+def _pull(num):
     """<번호>/fix/ 를 CACHE 로 내려받는다. 원본 이미지는 이미 받았으면 건너뛰고, 마스크·json 은 항상 최신으로."""
     dst = os.path.join(CACHE, str(num), "fix")
     os.makedirs(dst, exist_ok=True)
