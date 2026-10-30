@@ -312,8 +312,12 @@ def ds_new(idx, cmp=False):
         drv.prefetch(*(int(_stem(j)) for j in (idx + 1, idx + 2) if j < N))  # 다음 두 장을 미리 받아 둔다
     data = load_fix(idx)
     locked = [s for s, d in enumerate(data) if find_faces(d["pts"], d["lines"])[0]]  # 이미 그려 저장된 단계 (표시용)
-    return {"idx": idx, "step": 1 if cmp else 0, "tool": 0, "sel": None, "dirty": False, "touched": [],
-            "locked": locked, "cmp": cmp, "data": data}
+    first = 1 if cmp else 0
+    # visited: 거쳐 간 단계. 이미 마스크가 저장된 단계는 거친 것으로 본다 (기존 데이터는 그대로 완료 유지).
+    visited = sorted({first} | {s for s, n in enumerate(EDIT_FILES)
+                                if os.path.exists(os.path.join(_fix_dir(idx), f"{n}_mask.png"))})
+    return {"idx": idx, "step": first, "tool": 0, "sel": None, "dirty": False, "touched": [],
+            "locked": locked, "cmp": cmp, "data": data, "visited": visited}
 
 
 def _unlock(st):
@@ -420,6 +424,8 @@ def ds_set_step(st, label):
     _need_state(st)
     st = copy.deepcopy(st)
     st["step"], st["tool"], st["sel"] = EDIT_STEPS.index(label), 0, None  # 단계를 바꾸면 도구는 '점 찍기'로
+    if st["step"] not in st["visited"]:
+        st["visited"].append(st["step"])
     return _ds_out(st, radios=True)
 
 
@@ -495,6 +501,8 @@ def ds_next_step(st, dirty=False, save=False):
         return _ds_out(st, "파손 비교 화면에는 파손 단계만 있습니다.")
     msg = _save_if(st, save)
     st["step"], st["tool"], st["sel"] = min(st["step"] + 1, len(EDIT_STEPS) - 1), 0, None
+    if st["step"] not in st["visited"]:
+        st["visited"].append(st["step"])
     return _ds_out(st, msg, radios=True)
 
 
@@ -516,9 +524,11 @@ def _save_fix(st):
         for f in fs:
             dr.polygon([tuple(p) for p in f], fill=255)
         mpath = os.path.join(fix, f"{EDIT_FILES[s]}_mask.png")
-        if fs or EDIT_FILES[s] not in OPTIONAL_FILES:
+        required = EDIT_FILES[s] not in OPTIONAL_FILES
+        # 정답·직진·정지는 영역이 없어도 그 단계를 거쳤으면 빈 마스크로 저장한다. 거치지 않은 단계는 저장하지 않아 '미완료'로 남는다.
+        if fs or (required and s in st["visited"]):
             m.save(mpath)
-        elif os.path.exists(mpath):
+        elif not required and os.path.exists(mpath):
             os.remove(mpath)  # 파손/배치를 지웠다면 예전 마스크 파일도 정리
             removed.append(os.path.basename(mpath))
     with open(os.path.join(fix, "points.json"), "w", encoding="utf-8") as f:
@@ -528,15 +538,22 @@ def _save_fix(st):
     st["dirty"], st["touched"] = False, []
     if drv.enabled:
         num = int(_stem(st["idx"]))
-        DONE.add(num)
+        if all(os.path.exists(os.path.join(fix, f)) for f in REQUIRED_PNGS):
+            DONE.add(num)
+        else:
+            DONE.discard(num)
         drv.push_async(num, [n for n in os.listdir(fix) if n.endswith("_mask.png") or n == "points.json"], removed)
         if drv.errors:
             gr.Warning("Drive 업로드 실패:\n" + "\n".join(drv.errors[-3:]))
             drv.errors.clear()
     summary = ", ".join(f"{EDIT_SHORT[s]} {len(faces[s])}개" for s in range(len(faces)) if faces[s])
-    if not summary:
+    todo = [EDIT_SHORT[s] for s, n in enumerate(EDIT_FILES) if n not in OPTIONAL_FILES and s not in st["visited"] and not st.get("cmp")]
+    if todo:
+        gr.Warning("아직 안 거친 단계: " + ", ".join(todo) + " — 세 단계(정답·직진·정지)를 모두 거쳐야 완료됩니다.")
+    elif not summary:
         gr.Warning("영역이 하나도 없습니다 — 블록 없는 이미지로 저장했습니다.")
-    return f"저장됨: {fix}\n영역: {summary or '없음'} (마스크 / points.json — 파손·배치는 그린 경우만)"
+    return (f"저장됨: {fix}\n영역: {summary or '없음'} (마스크 / points.json — 파손·배치는 그린 경우만)"
+            + (f"\n⬜ 미완료 — 남은 단계: {', '.join(todo)}" if todo else ""))
 
 
 def _find_incomplete(start, direction):
