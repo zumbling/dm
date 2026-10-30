@@ -22,6 +22,7 @@ import json
 import os
 import urllib.request
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -141,12 +142,29 @@ def index(required):
 
 
 _pull_lock = threading.Lock()
+_pulled = {}                                   # 번호 -> 마지막으로 받은 시각
+_prefetch_pool = ThreadPoolExecutor(max_workers=1)
 
 
-def pull(num):
-    """라벨링·파손비교 두 탭이 동시에 같은 번호를 열어도 같은 임시 파일을 서로 덮어쓰지 않게 한 번에 하나씩 받는다."""
+def pull(num, max_age=0):
+    """<번호>/fix/ 를 받는다. 한 번에 하나씩만 받고(두 탭이 같은 임시 파일을 덮어쓰지 않게),
+    max_age 초 안에 이미 받았으면(미리 받아 둔 경우) 건너뛴다 — 방금 저장한 마스크를 되돌려 지우는 것도 막는다."""
     with _pull_lock:
+        if max_age and time.time() - _pulled.get(num, 0) < max_age:
+            return
         _pull(num)
+        _pulled[num] = time.time()
+
+
+def prefetch(*nums):
+    """보고 있는 동안 다음 이미지들을 백그라운드로 미리 받아 둔다 (실패해도 조용히 넘어간다)."""
+    def run(n):
+        try:
+            pull(n, max_age=120)
+        except Exception:
+            pass
+    for n in nums:
+        _prefetch_pool.submit(run, n)
 
 
 def _pull(num):

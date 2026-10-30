@@ -278,7 +278,8 @@ def ds_new(idx, cmp=False):
     """cmp=True: 파손 비교 화면용 (파손 단계만 편집, JSON 박스를 겹쳐 보여줌).
     touched: 이번에 수정한 단계 — 저장할 때 나머지 단계는 디스크의 최신 내용을 써서 다른 화면의 저장을 덮어쓰지 않는다."""
     if drv.enabled:
-        drv.pull(int(_stem(idx)))  # 이 번호의 fix/ 를 Drive 에서 내려받는다
+        drv.pull(int(_stem(idx)), max_age=120)  # 이 번호의 fix/ 를 Drive 에서 내려받는다 (미리 받아 둔 건 건너뜀)
+        drv.prefetch(*(int(_stem(j)) for j in (idx + 1, idx + 2) if j < N))  # 다음 두 장을 미리 받아 둔다
     data = load_fix(idx)
     locked = [s for s, d in enumerate(data) if find_faces(d["pts"], d["lines"])[0]]  # 이미 그려 저장된 단계 (표시용)
     return {"idx": idx, "step": 1 if cmp else 0, "tool": 0, "sel": None, "dirty": False, "touched": [],
