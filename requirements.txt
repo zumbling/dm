@@ -1,6 +1,6 @@
 # 라벨링 도구 + 데이터셋 내보내기 (2_dataset)
 numpy
 pillow
-gradio>=5.23
+gradio>=5.23,<6
 google-api-python-client
 google-auth-oauthlib
