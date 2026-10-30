@@ -1,0 +1,7 @@
+credentials.json
+token.json
+.env
+.drive_cache/
+__pycache__/
+*.pyc
+.DS_Store
