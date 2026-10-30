@@ -9,10 +9,18 @@
 처음 실행하면 브라우저에서 구글 로그인 창이 한 번 뜬다 (token.json 에 저장).
 배포(서버)에서는 로그인 창을 띄울 수 없으므로 token.json 의 내용을 환경변수 LABELER_TOKEN_JSON 에 넣는다.
   -> 서버가 폴더 소유자 계정으로 읽고 쓴다 (파일 소유자가 소유자 본인이라 개인 드라이브 용량 문제도 없다).
+
+로그인 없이 쓰기 (구글 로그인·credentials·token 불필요):
+  폴더 소유자가 apps_script/Code.gs 를 웹앱으로 한 번 배포하고, 서버에는 아래 두 값만 넣는다.
+  LABELER_GAS_URL   배포한 웹앱 URL (…/exec)
+  LABELER_GAS_KEY   Code.gs 의 KEY 스크립트 속성과 같은 비밀 문자열
+  -> 이 모드에서는 LABELER_DRIVE_ID 도 필요 없다 (폴더 ID 는 웹앱 쪽에 있다).
 """
+import base64
 import io
 import json
 import os
+import urllib.request
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -22,7 +30,9 @@ CREDS = os.environ.get("LABELER_CREDS", os.path.join(HERE, "credentials.json"))
 TOKEN = os.path.join(HERE, "token.json")
 CACHE = os.environ.get("LABELER_CACHE", os.path.join(HERE, ".drive_cache"))
 RANGE = os.environ.get("LABELER_RANGE", "")
-enabled = bool(ROOT_ID)
+GAS_URL = os.environ.get("LABELER_GAS_URL")
+GAS_KEY = os.environ.get("LABELER_GAS_KEY", "")
+enabled = bool(ROOT_ID or GAS_URL)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER = "application/vnd.google-apps.folder"
@@ -77,6 +87,24 @@ def _list(q, fields):
             return out
 
 
+def _gas(action, **kw):
+    """Apps Script 웹앱 호출 (POST 는 302 로 결과 주소에 넘어가고 urllib 이 따라간다)."""
+    req = urllib.request.Request(GAS_URL, data=json.dumps({"key": GAS_KEY, "action": action, **kw}).encode(),
+                                 headers={"Content-Type": "text/plain"})
+    with urllib.request.urlopen(req, timeout=300) as r:
+        res = json.loads(r.read().decode())
+    if res.get("error"):
+        raise RuntimeError(res["error"])
+    return res
+
+
+def _cleanup(dst, remote):
+    """다른 곳에서 지워진 마스크가 캐시에 남아 있지 않게 정리"""
+    for n in os.listdir(dst):
+        if n.endswith(("_mask.png", ".json")) and n not in remote:
+            os.remove(os.path.join(dst, n))
+
+
 def _in_range(n):
     if not RANGE:
         return True
@@ -87,6 +115,9 @@ def _in_range(n):
 def index(required):
     """Drive 를 몇 번만 조회해 (이미지가 있는 번호 목록, 완료된 번호 집합) 을 만든다.
     required: 완료로 보려면 fix/ 에 있어야 하는 파일 이름들."""
+    if GAS_URL:
+        res = _gas("index", required=list(required))
+        return sorted(n for n in res["nums"] if _in_range(n)), set(res["done"])
     num_of = {f["id"]: int(f["name"]) for f in
               _list(f"'{ROOT_ID}' in parents and mimeType='{FOLDER}' and trashed=false", "id,name")
               if f["name"].isdigit()}
@@ -111,9 +142,18 @@ def index(required):
 
 def pull(num):
     """<번호>/fix/ 를 CACHE 로 내려받는다. 원본 이미지는 이미 받았으면 건너뛰고, 마스크·json 은 항상 최신으로."""
-    from googleapiclient.http import MediaIoBaseDownload
     dst = os.path.join(CACHE, str(num), "fix")
     os.makedirs(dst, exist_ok=True)
+    if GAS_URL:
+        res = _gas("pull", num=num, orig=not os.path.exists(os.path.join(dst, "original.jpeg")))
+        for f in res["files"]:
+            p = os.path.join(dst, f["name"])
+            with open(p + ".part", "wb") as fh:
+                fh.write(base64.b64decode(f["b64"]))
+            os.replace(p + ".part", p)
+        _cleanup(dst, set(res["names"]))
+        return
+    from googleapiclient.http import MediaIoBaseDownload
     fid = fix_ids.get(num)
     if not fid:
         return
@@ -130,15 +170,17 @@ def pull(num):
                 _, ok = dl.next_chunk()
         os.replace(p + ".part", p)
     # 다른 곳에서 지워진 마스크가 캐시에 남아 있지 않게 정리
-    remote = {f["name"] for f in _list(f"'{fid}' in parents and trashed=false", "name")}
-    for n in os.listdir(dst):
-        if n.endswith(("_mask.png", ".json")) and n not in remote:
-            os.remove(os.path.join(dst, n))
+    _cleanup(dst, {f["name"] for f in _list(f"'{fid}' in parents and trashed=false", "name")})
 
 
 def _push(num, names, removed):
     from googleapiclient.http import MediaFileUpload
     try:
+        if GAS_URL:
+            files = [{"name": n, "b64": base64.b64encode(open(os.path.join(CACHE, str(num), "fix", n), "rb").read()).decode()}
+                     for n in names]
+            _gas("push", num=num, files=files, removed=removed)
+            return
         fid = fix_ids.get(num)
         if not fid:
             parent = next((f["id"] for f in _list(f"'{ROOT_ID}' in parents and name='{num}' and mimeType='{FOLDER}' and trashed=false", "id")), None)
