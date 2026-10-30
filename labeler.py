@@ -73,7 +73,7 @@ EDIT_SHORT = ["정답", "파손", "배치", "직진", "정지"]
 EDIT_FILES = ["paving", "damage", "misplaced", "straight", "stop"]
 EDIT_COLORS = [(0, 200, 0), (255, 70, 70), (70, 120, 255), (255, 170, 0), (180, 80, 255)]
 EDIT_TOOLS = ["점 찍기", "선 추가 (점 2개 선택)", "지우개 (점·선 클릭)"]
-EDIT_VIEW_MAX = 1600  # 편집 화면에 표시하는 이미지의 긴 변 최대 픽셀 (클릭마다 전송되는 용량을 줄임)
+EDIT_VIEW_MAX = int(os.environ.get("LABELER_VIEW_MAX", 1600))  # 편집 화면에 표시하는 이미지의 긴 변 최대 픽셀 (클릭마다 전송되는 용량을 줄임)
 OPTIONAL_FILES = {"damage", "misplaced"}  # 파손/배치는 없어도 됨 (그린 경우에만 마스크 저장)
 # fix/ 에 이 PNG 가 전부 있으면 '완료'로 보고 순회 때 건너뛴다.
 # 정답/직진/정지 마스크는 영역이 없어도 빈(검은) 마스크로 저장하므로 항상 존재한다.
@@ -591,7 +591,8 @@ def ds_save_next(st):
 # 화면
 # ====================================================================================
 # 이미지 위에 겹쳐 나오는 기본 전체보기/다운로드/공유 아이콘은 끄고, 이미지 밖(제목 아래) 버튼으로 대체
-IMG_NO_OVERLAY = dict(show_download_button=False, show_fullscreen_button=False, show_share_button=False)
+IMG_NO_OVERLAY = dict(show_download_button=False, show_fullscreen_button=False, show_share_button=False,
+                      format="jpeg")  # 기본 webp 는 인코딩이 느려 클릭마다 지연됨
 _JS_FULLSCREEN = ("() => { const i = document.querySelector('#%s img'); "
                   "if (i) { (i.requestFullscreen || i.webkitRequestFullscreen).call(i); } }")
 _JS_DOWNLOAD = ("async () => { const i = document.querySelector('#%s img'); if (!i) return; "
