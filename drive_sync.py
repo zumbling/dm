@@ -130,9 +130,12 @@ def _in_range(n):
     return int(a or 0) <= n <= int(b or 10 ** 9)
 
 
-def index(required):
+present = {}                                 # 번호 -> fix/ 에 있는 파일 이름들 (index 때 조회한 이름만, 전체보기 탭용)
+
+
+def index(required, extra=()):
     """Drive 를 몇 번만 조회해 (이미지가 있는 번호 목록, 완료된 번호 집합) 을 만든다.
-    required: 완료로 보려면 fix/ 에 있어야 하는 파일 이름들."""
+    required: 완료로 보려면 fix/ 에 있어야 하는 파일 이름들. extra: 전체보기 탭에 보여줄 추가 파일 이름들 (present 에 기록)."""
     if GAS_URL:
         res = _gas("index", required=list(required))
         return sorted(n for n in res["nums"] if _in_range(n)), set(res["done"])
@@ -149,12 +152,15 @@ def index(required):
     have = {num_of_fix[p] for f in _list("name='original.jpeg' and trashed=false", "parents")
             for p in f.get("parents", []) if p in num_of_fix}
     cnt = {}
-    names = " or ".join(f"name='{n}'" for n in required)
+    names = " or ".join(f"name='{n}'" for n in dict.fromkeys([*required, *extra]))
     for f in _list(f"({names}) and trashed=false", "name,parents"):
         for p in f.get("parents", []):
             if p in num_of_fix:
                 cnt.setdefault(num_of_fix[p], set()).add(f["name"])
-    done = {n for n, s in cnt.items() if len(s) == len(required)}
+    done = {n for n, s in cnt.items() if set(required) <= s}
+    present.clear()
+    for n in have:
+        present[n] = {"original.jpeg"} | cnt.get(n, set())
     return sorted(n for n in have if _in_range(n)), done
 
 

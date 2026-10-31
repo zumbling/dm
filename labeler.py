@@ -84,7 +84,7 @@ REQUIRED_PNGS = [f"{n}_mask.png" for n in EDIT_FILES if n not in OPTIONAL_FILES]
 
 DONE = set()  # Drive 모드: 완료된 번호 (시작 때 한 번 조회해 메모리에 두고 저장할 때마다 갱신)
 if drv.enabled:
-    _nums, DONE = drv.index(REQUIRED_PNGS)
+    _nums, DONE = drv.index(REQUIRED_PNGS, extra=[f"{n}_mask.png" for n in EDIT_FILES] + ["points.json"])
     ALL_FILES = [os.path.join(SAVE_ROOT, str(n), "fix", ORIGINAL) for n in _nums]
     N = len(ALL_FILES)
 
@@ -805,6 +805,74 @@ def ds_sync(src, dst, cmp):
         return (gr.skip(),) * 7
     return _goto(None, src["idx"], cmp=cmp, sid=src.get("sid"))
 
+# ====================================================================================
+# 전체보기 — 번호마다 원래 파손 데이터인지 정상 데이터인지, 어떤 이미지·라벨 파일이 있는지
+# (구분·상태·파손 박스는 build_overview.py 가 만든 overview.json 에서 읽는다)
+# ====================================================================================
+try:
+    with open(os.path.join(HERE, "overview.json"), encoding="utf-8") as _f:
+        OVERVIEW = json.load(_f)
+except (OSError, ValueError):
+    OVERVIEW = {}
+OV_PAGE = 50
+OV_COLS = ["번호", "구분", "상태", "파손 박스", "완료", "있는 라벨"]
+OV_KINDS = ["전체", "파손", "정상", "미확인"]
+OV_STATES = ["전체", "완료", "미완료"]
+OV_CAPTION = {ORIGINAL: "원본", "points.json": "points.json", **{f"{n}_mask.png": f"{EDIT_SHORT[i]} 마스크" for i, n in enumerate(EDIT_FILES)}}
+
+
+def _ov_files(num):
+    """번호 num 의 fix/ 에 있는 파일 이름들 (Drive 모드는 시작 때 조회한 목록 + 이 서버가 저장한 것)."""
+    d = os.path.join(SAVE_ROOT, str(num), "fix")
+    names = set(os.listdir(d)) if os.path.isdir(d) else set()
+    return names | drv.present.get(num, set()) if drv.enabled else names
+
+
+def _ov_meta(num):
+    return OVERVIEW.get(str(num), {"kind": "미확인"})
+
+
+def _ov_done(num, idx):
+    return int(num) in DONE if drv.enabled else is_complete(idx)
+
+
+def ov_go(kind, state, page, delta=0, reset=False):
+    """필터를 적용해 page(+delta) 쪽을 표로 만든다. 반환: 표, 안내 문구, 현재 쪽."""
+    nums = {int(_stem(i)): i for i in range(N)}
+    rows_n = [n for n in sorted(nums)
+              if (kind == "전체" or _ov_meta(n)["kind"] == kind)
+              and (state == "전체" or (_ov_done(n, nums[n]) == (state == "완료")))]
+    pages = max(1, math.ceil(len(rows_n) / OV_PAGE))
+    page = 1 if reset else min(max(int(page or 1) + delta, 1), pages)
+    rows = []
+    for n in rows_n[(page - 1) * OV_PAGE: page * OV_PAGE]:
+        m, files = _ov_meta(n), _ov_files(n)
+        dmg = m.get("damage") or []
+        rows.append([n, m["kind"], m.get("status") or "-",
+                     f"{len(dmg)}개 ({', '.join(sorted(set(dmg)))})" if dmg else "-",
+                     "✅" if _ov_done(n, nums[n]) else "⬜",
+                     " ".join(EDIT_SHORT[i] for i, e in enumerate(EDIT_FILES) if f"{e}_mask.png" in files) or "-"])
+    if not OVERVIEW:
+        gr.Warning("overview.json 이 없어 구분·파손 박스를 알 수 없습니다 (build_overview.py 로 만들어 두세요).")
+    return rows, f"조건에 맞는 번호 {len(rows_n)}개 · {page} / {pages} 쪽", page
+
+
+def ov_pick(evt: gr.SelectData):
+    """표에서 번호를 누르면 그 번호의 설명과 들어 있는 이미지(원본·마스크)를 보여준다."""
+    num = int(evt.row_value[0])
+    if drv.enabled:
+        drv.pull(num, max_age=120)
+    m, d = _ov_meta(num), os.path.join(SAVE_ROOT, str(num), "fix")
+    names = [ORIGINAL] + [f"{n}_mask.png" for n in EDIT_FILES]
+    items = [(os.path.join(d, n), OV_CAPTION[n]) for n in names if os.path.exists(os.path.join(d, n))]
+    dmg = m.get("damage") or []
+    info = (f"### {num}번 · {m['kind']} 데이터\n"
+            f"- 원본 파일: `{m.get('orig', '?')}` · AI Hub 상태: `{m.get('status') or '-'}`\n"
+            f"- JSON 파손 박스: {', '.join(dmg) if dmg else '없음'}\n"
+            f"- 들어 있는 파일: {', '.join(OV_CAPTION[n] for n in names + ['points.json'] if os.path.exists(os.path.join(d, n))) or '없음'}")
+    return info, items
+
+
 with gr.Blocks(title="점자블록 데이터셋 라벨링", css=PAGE_CSS) as demo:
     gr.Markdown("## 점자블록 데이터셋 라벨링")
     gr.Markdown(f"이미지·라벨 `{SAVE_ROOT}/<번호>/fix/` ({N}장)" if N else
@@ -813,6 +881,26 @@ with gr.Blocks(title="점자블록 데이터셋 라벨링", css=PAGE_CSS) as dem
         st_label, out_label = build_editor(False)
     with gr.Tab("파손 비교 (JSON)") as tab_cmp:
         st_cmp, out_cmp = build_editor(True)
+    with gr.Tab("전체보기") as tab_ov:
+        with gr.Row():
+            ov_kind = gr.Radio(OV_KINDS, value="전체", label="구분 (원래 AI Hub 폴더)")
+            ov_state = gr.Radio(OV_STATES, value="전체", label="라벨링 상태")
+        with gr.Row():
+            ov_prev = gr.Button("◀ 이전 쪽")
+            ov_next = gr.Button("다음 쪽 ▶")
+            ov_page = gr.Number(value=1, precision=0, label="쪽", scale=0, min_width=90)
+            ov_info = gr.Markdown()
+        ov_table = gr.Dataframe(headers=OV_COLS, value=[], interactive=False, wrap=True, label="번호를 누르면 아래에 이미지가 나옵니다")
+        ov_detail = gr.Markdown("표에서 번호를 누르세요.")
+        ov_gallery = gr.Gallery(label="들어 있는 이미지", columns=3, height="auto", object_fit="contain")
+    OV_IN, OV_OUT = [ov_kind, ov_state, ov_page], [ov_table, ov_info, ov_page]
+    tab_ov.select(lambda k, s, p: ov_go(k, s, p), OV_IN, OV_OUT)
+    ov_kind.change(lambda k, s, p: ov_go(k, s, p, reset=True), OV_IN, OV_OUT)
+    ov_state.change(lambda k, s, p: ov_go(k, s, p, reset=True), OV_IN, OV_OUT)
+    ov_prev.click(lambda k, s, p: ov_go(k, s, p, -1), OV_IN, OV_OUT)
+    ov_next.click(lambda k, s, p: ov_go(k, s, p, 1), OV_IN, OV_OUT)
+    ov_page.submit(lambda k, s, p: ov_go(k, s, p), OV_IN, OV_OUT)
+    ov_table.select(ov_pick, None, [ov_detail, ov_gallery])
     # 탭을 바꿀 때 보던 이미지와 디스크의 최신 저장 내용으로 맞춤
     tab_label.select(lambda a, b: ds_sync(a, b, False), [st_cmp, st_label], out_label)
     tab_cmp.select(lambda a, b: ds_sync(a, b, True), [st_label, st_cmp], out_cmp)
