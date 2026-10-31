@@ -15,6 +15,7 @@ import argparse
 import copy
 import csv
 import functools
+import html
 import io
 import json
 import math
@@ -279,7 +280,7 @@ def edit_status(st):
         faces, op = find_faces(data["pts"], data["lines"])
         mark = "▶ " if s == st["step"] else "   "
         lines.append(f"{mark}{EDIT_SHORT[s]}: 점 {len(data['pts'])}개, 선 {len(data['lines'])}개, 영역 {len(faces)}개"
-                     + (f", 영역이 안 된 선 묶음 {op}개" if op else "") + (" 🔒완료(저장됨)" if s in st["locked"] else ""))
+                     + (f", 영역이 안 된 선 묶음 {op}개" if op else "") + (" 완료(저장됨)" if s in st["locked"] else ""))
     return "\n".join(lines)
 
 
@@ -378,7 +379,7 @@ def ds_head(st):
         return (f"### 이미지 {st['idx'] + 1} / {N} · `{_stem(st['idx'])}번`\n"
                 f"파란 박스 = AI Hub JSON 파손 · 저장: `data/img/{_stem(st['idx'])}/fix/damage_mask.png`")
     done = sum(is_complete(i) for i in range(N))
-    cur = "✅ 완료" if is_complete(st["idx"]) else "⬜ 미완료"
+    cur = "완료" if is_complete(st["idx"]) else "미완료"
     others = busy_others(st["idx"], st.get("sid"))
     cur += f" · 👤 다른 사람이 작업 중{f' ({others}명)' if others > 1 else ''}" if others else ""
     return (f"### 이미지 {st['idx'] + 1} / {N} · `{_stem(st['idx'])}번` · {cur}\n"
@@ -389,7 +390,7 @@ def _ds_out(st, extra="", head=False, radios=False):
     """편집 화면 갱신값 7개: 캔버스, 상태, 상태 문구, 머리말, 단계 라디오, 도구 라디오, 저장 안 한 변경 여부."""
     _claim(st)  # 조작할 때마다 '작업 중' 시각을 갱신
     msg = ((extra + "\n" if extra else "") + edit_status(st) + ("\n" + cmp_text(st) if st.get("cmp") else "")
-           + ("\n● 저장하지 않은 변경이 있습니다" if st["dirty"] else ""))
+           + ("\n[저장하지 않은 변경이 있습니다]" if st["dirty"] else ""))
     return (draw_edit(load_np(ALL_FILES[st["idx"]]), st), st, msg,
             ds_head(st) if head else gr.skip(),
             gr.update(value=EDIT_STEPS[st["step"]]) if radios else gr.skip(),
@@ -608,7 +609,7 @@ def _save_fix_locked(st):
     elif not summary:
         gr.Warning("영역이 하나도 없습니다 — 블록 없는 이미지로 저장했습니다.")
     return (f"저장됨: {fix}\n영역: {summary or '없음'} (마스크 / points.json — 파손·배치는 그린 경우만)"
-            + (f"\n⬜ 미완료 — 남은 단계: {', '.join(todo)}" if todo else ""))
+            + (f"\n미완료 — 남은 단계: {', '.join(todo)}" if todo else ""))
 
 
 def _find_incomplete(start, direction, sid=None):
@@ -707,18 +708,67 @@ _JS_DOWNLOAD = ("async () => { const i = document.querySelector('#%s img'); if (
                 "a.href = URL.createObjectURL(blob); a.download = '%s'; document.body.appendChild(a); a.click(); "
                 "a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }")
 # 업로드용 입력 이미지 안쪽에 남는 전체화면 아이콘 숨김 (업로드/삭제 버튼은 그대로)
-PAGE_CSS = """#img_input button[aria-label="View in full screen"] { display: none !important; }
-.gradio-container { max-width: 1500px !important; }
-.head h3 { margin: 0 0 2px; }
-.head p { margin: 0; color: var(--body-text-color-subdued); }
-.mono textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }"""
+BLUSH = gr.themes.Color(name="blush", c50="#fff7f9", c100="#fdecf0", c200="#fbd9e2", c300="#f7bfcd", c400="#f0a0b5",
+                        c500="#e47f9a", c600="#cc6283", c700="#aa4d6b", c800="#873e55", c900="#6a3345", c950="#4a2230")
+THEME = gr.themes.Base(
+    primary_hue=BLUSH, secondary_hue=BLUSH, neutral_hue=gr.themes.colors.slate,
+    font=["Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", "system-ui", "sans-serif"],
+    font_mono=["ui-monospace", "Menlo", "monospace"],
+    radius_size=gr.themes.sizes.radius_sm, text_size=gr.themes.sizes.text_md,
+).set(
+    body_background_fill="#faf8f9", body_text_color="#2b2428", body_text_color_subdued="#7d7479",
+    block_background_fill="#ffffff", block_border_width="1px", block_border_color="#ece6e9", block_shadow="none",
+    block_label_background_fill="transparent", block_label_text_color="#7d7479", block_label_text_weight="600",
+    block_title_text_weight="600", block_title_text_color="#4a3f45",
+    input_background_fill="#ffffff", input_border_color="#e4dce0", input_border_color_focus="#e47f9a", input_shadow_focus="0 0 0 3px #fdecf0",
+    button_primary_background_fill="#f3b3c4", button_primary_background_fill_hover="#ee9db3", button_primary_text_color="#4a2230",
+    button_primary_border_color="transparent",
+    button_secondary_background_fill="#ffffff", button_secondary_background_fill_hover="#fff7f9",
+    button_secondary_text_color="#3d3338", button_secondary_border_color="#e4dce0",
+    checkbox_label_background_fill_selected="#fdecf0", checkbox_label_border_color_selected="#e47f9a",
+    checkbox_label_text_color_selected="#6a3345", checkbox_background_color_selected="#e47f9a", checkbox_border_color_selected="#e47f9a",
+    loader_color="#e47f9a", slider_color="#e47f9a",
+)
+PAGE_CSS = """@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css");
+#img_input button[aria-label="View in full screen"] { display: none !important; }
+.gradio-container { max-width: 1440px !important; font-family: Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif !important; }
+footer { display: none !important; }
+/* 상단 바 */
+.app-header { display: flex; align-items: baseline; gap: 14px; padding: 6px 2px 14px; margin-bottom: 6px; border-bottom: 1px solid #ece6e9; }
+.app-header .brand { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; color: #2b2428; }
+.app-header .brand b { color: #cc6283; font-weight: 700; }
+.app-header .meta { font-size: 13px; color: #7d7479; }
+.notice { padding: 10px 14px; border: 1px solid #f7bfcd; background: #fff7f9; border-radius: 6px; color: #6a3345; font-size: 14px; }
+/* 탭 */
+button[role="tab"] { font-weight: 600 !important; color: #7d7479 !important; padding: 10px 16px !important; }
+button[role="tab"][aria-selected="true"] { color: #aa4d6b !important; border-bottom: 2px solid #e47f9a !important; }
+/* 머리말·섹션 */
+.head h3 { margin: 0 0 2px; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.head p { margin: 0; color: #7d7479; font-size: 13px; }
+.section-label p { margin: 6px 0 0; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; color: #7d7479; }
+.mono textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.55; }
+/* 버튼은 작고 단정하게 */
+button { font-weight: 600 !important; letter-spacing: -0.01em; }
+button.primary:hover { filter: none; }
+button.sm { font-size: 12.5px !important; }
+button.secondary { border: 1px solid #e4dce0 !important; }
+button.secondary:hover { border-color: #e47f9a !important; color: #6a3345 !important; }
+/* 표: 셀 글꼴을 본문과 같게 */
+.table-wrap, table, table td, table td *, table th, table th * { font-family: Pretendard, "Apple SD Gothic Neo", system-ui, sans-serif !important; font-size: 13px; }
+table td, table td * { font-weight: 500 !important; }
+.pager { align-items: center !important; }
+.pager p { margin: 0; color: #7d7479; font-size: 13px; }
+table thead th { background: #fff7f9 !important; color: #4a3f45 !important; font-weight: 700 !important; }
+table tbody tr:hover td { background: #fff7f9 !important; }
+/* 아코디언 */
+.gradio-container .label-wrap { font-weight: 600; color: #4a3f45; }"""
 
 
 def img_tools(elem_id, filename):
     """이미지(elem_id) 바깥에 전체보기 / 다운로드 버튼을 둔다. 브라우저에서 바로 동작(서버 왕복 없음)."""
     with gr.Row():
-        full = gr.Button("⛶ 전체보기", size="sm", scale=0, min_width=110)
-        down = gr.Button("⬇ 다운로드", size="sm", scale=0, min_width=110)
+        full = gr.Button("전체 화면", size="sm", scale=0, min_width=110)
+        down = gr.Button("다운로드", size="sm", scale=0, min_width=110)
     full.click(None, None, None, js=_JS_FULLSCREEN % elem_id)
     down.click(None, None, None, js=_JS_DOWNLOAD % (elem_id, filename))
 
@@ -746,11 +796,11 @@ def build_editor(cmp=False):
             gr.Markdown("**단계**를 고르고 `점 찍기`로 모서리마다 점을 찍은 뒤, `선 추가`로 바꿔 **점 2개를 차례로 클릭하면 선이 이어집니다.** "
                         "선이 한 바퀴 닫히면 안쪽이 영역이 되고, 이미 닫은 영역의 점에서도 다시 이어서 새 영역을 만들 수 있습니다. "
                         "저장하면 `fix/` 에 PNG 가 만들어지며(파손·배치는 안 그려도 됨), "
-                        "이미 그려진 단계는 상태창에 🔒완료로 표시되며, 그 위에 바로 점·선을 더 그릴 수 있고 `지우개` 로 점이나 선을 클릭해 지울 수도 있습니다. "
+                        "이미 그려진 단계는 상태창에 완료로 표시되며, 그 위에 바로 점·선을 더 그릴 수 있고 `지우개` 로 점이나 선을 클릭해 지울 수도 있습니다. "
                         "변경한 채 `다음`/`이전`/`이동`/`다음 단계` 를 누르면 저장할지 묻습니다.")
     with gr.Row(equal_height=True):
-        ds_prev_btn = gr.Button("◀ 이전", scale=3)
-        ds_next_btn = gr.Button("다음 ▶", scale=3)
+        ds_prev_btn = gr.Button("이전", scale=3)
+        ds_next_btn = gr.Button("다음", scale=3)
         ds_jump_n = gr.Number(value=1, precision=0, minimum=1, maximum=max(N, 1), show_label=False, container=False,
                               min_width=80, scale=1)
         ds_jump_btn = gr.Button("번호로 이동", scale=2)
@@ -764,18 +814,18 @@ def build_editor(cmp=False):
         with gr.Column(scale=1, min_width=260):
             ds_msg = gr.Textbox(label="상태", lines=9 if cmp else 7, interactive=False, elem_classes="mono")
             with gr.Row():
-                ds_save_btn = gr.Button("💾 저장", variant="secondary")
-                ds_save_next_btn = gr.Button("💾 저장 후 다음 ▶", variant="primary")
+                ds_save_btn = gr.Button("저장", variant="secondary")
+                ds_save_next_btn = gr.Button("저장 후 다음", variant="primary")
             ds_save_msg = gr.Textbox(label="저장 결과", lines=3, interactive=False, elem_classes="mono")
-            gr.Markdown("**편집**")
+            gr.Markdown("**편집**", elem_classes="section-label")
             with gr.Row():
-                ds_undo_pt_btn = gr.Button("↩ 점 취소", size="sm")
-                ds_undo_ln_btn = gr.Button("↩ 선 취소", size="sm")
+                ds_undo_pt_btn = gr.Button("점 취소", size="sm")
+                ds_undo_ln_btn = gr.Button("선 취소", size="sm")
             with gr.Row():
                 ds_clear_btn = gr.Button("이 단계 초기화", size="sm")
-                ds_reset_btn = gr.Button("↺ 저장본으로 되돌리기", size="sm")
+                ds_reset_btn = gr.Button("저장본으로 되돌리기", size="sm")
             if not cmp:
-                ds_nextstep_btn = gr.Button("다음 단계 ▶ (건너뛰기)", size="sm")
+                ds_nextstep_btn = gr.Button("다음 단계 (건너뛰기)", size="sm")
 
     DS_OUT = [ds_canvas, ds_state, ds_msg, ds_head_md, ds_step, ds_tool, ds_dirty]
     quiet = dict(show_progress="hidden", trigger_mode="multiple")  # 클릭마다 로딩 표시 없음, 빠른 연속 클릭도 모두 처리
@@ -850,7 +900,7 @@ def ov_go(kind, state, page, delta=0, reset=False):
         dmg = m.get("damage") or []
         rows.append([n, m["kind"], m.get("status") or "-",
                      f"{len(dmg)}개 ({', '.join(sorted(set(dmg)))})" if dmg else "-",
-                     "✅" if _ov_done(n, nums[n]) else "⬜",
+                     "완료" if _ov_done(n, nums[n]) else "미완료",
                      " ".join(EDIT_SHORT[i] for i, e in enumerate(EDIT_FILES) if f"{e}_mask.png" in files) or "-"])
     if not OVERVIEW:
         gr.Warning("overview.json 이 없어 구분·파손 박스를 알 수 없습니다 (build_overview.py 로 만들어 두세요).")
@@ -873,10 +923,11 @@ def ov_pick(evt: gr.SelectData):
     return info, items
 
 
-with gr.Blocks(title="점자블록 데이터셋 라벨링", css=PAGE_CSS) as demo:
-    gr.Markdown("## 점자블록 데이터셋 라벨링")
-    gr.Markdown(f"이미지·라벨 `{SAVE_ROOT}/<번호>/fix/` ({N}장)" if N else
-                f"⚠️ 이미지를 찾을 수 없습니다: `{SAVE_ROOT}/<번호>/fix/{ORIGINAL}`")
+with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS) as demo:
+    _where = "Google Drive 연동" if drv.enabled else html.escape(str(SAVE_ROOT))
+    gr.HTML('<div class="app-header"><span class="brand">점자블록 <b>라벨링</b></span>'
+            + (f'<span class="meta">{N}장 · {_where}</span></div>' if N else '</div>')
+            + ('' if N else f'<div class="notice">이미지를 찾을 수 없습니다: <code>{html.escape(str(SAVE_ROOT))}/&lt;번호&gt;/fix/{ORIGINAL}</code></div>'))
     with gr.Tab("라벨링") as tab_label:
         st_label, out_label = build_editor(False)
     with gr.Tab("파손 비교 (JSON)") as tab_cmp:
@@ -885,10 +936,10 @@ with gr.Blocks(title="점자블록 데이터셋 라벨링", css=PAGE_CSS) as dem
         with gr.Row():
             ov_kind = gr.Radio(OV_KINDS, value="전체", label="구분 (원래 AI Hub 폴더)")
             ov_state = gr.Radio(OV_STATES, value="전체", label="라벨링 상태")
-        with gr.Row():
-            ov_prev = gr.Button("◀ 이전 쪽")
-            ov_next = gr.Button("다음 쪽 ▶")
-            ov_page = gr.Number(value=1, precision=0, label="쪽", scale=0, min_width=90)
+        with gr.Row(elem_classes="pager", equal_height=True):
+            ov_prev = gr.Button("이전 쪽", scale=0, min_width=110)
+            ov_next = gr.Button("다음 쪽", scale=0, min_width=110)
+            ov_page = gr.Number(value=1, precision=0, show_label=False, container=False, scale=0, min_width=70)
             ov_info = gr.Markdown()
         ov_table = gr.Dataframe(headers=OV_COLS, value=[], interactive=False, wrap=True, label="번호를 누르면 아래에 이미지가 나옵니다")
         ov_detail = gr.Markdown("표에서 번호를 누르세요.")
