@@ -380,7 +380,7 @@ try:
         ASSIGN = json.load(_f)   # 번호 -> 담당자 이름 (build_assignments.py 가 만든다)
 except (OSError, ValueError):
     ASSIGN = {}
-PEOPLE = ["종빈", "수임", "윤진", "태희"]
+PEOPLE = ["수임", "윤진", "태희", "종빈"]  # 전체보기 카드·담당 필터 표시 순서
 
 
 @functools.lru_cache(maxsize=None)
