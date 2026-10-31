@@ -82,11 +82,19 @@ EDIT_VIEW_MAX = int(os.environ.get("LABELER_VIEW_MAX", 1600))  # 편집 화면�
 OPTIONAL_FILES = {"damage", "misplaced"}  # 파손/배치는 없어도 됨 (그린 경우에만 마스크 저장)
 # fix/ 에 이 PNG 가 전부 있으면 '완료'로 보고 순회 때 건너뛴다.
 # 정답/직진/정지 마스크는 영역이 없어도 빈(검은) 마스크로 저장하므로 항상 존재한다.
-REQUIRED_PNGS = [f"{n}_mask.png" for n in EDIT_FILES if n not in OPTIONAL_FILES]
+# 완료 기준: 정답 마스크 + (직진 또는 정지 마스크 중 하나). 직진·정지는 그 이미지에 없을 수도 있어서 둘 중 하나만 있으면 된다.
+# 마스크는 그 단계를 거치거나 그렸을 때만 저장되므로(빈 마스크 포함), 파일이 있다는 건 그 단계를 처리했다는 뜻이다.
+REQUIRED_PNGS = ["paving_mask.png"]
+ONE_OF_PNGS = ["straight_mask.png", "stop_mask.png"]
+
+
+def masks_complete(names):
+    """fix/ 에 있는 파일 이름들로 완료 여부를 판단한다."""
+    return all(n in names for n in REQUIRED_PNGS) and any(n in names for n in ONE_OF_PNGS)
 
 DONE = set()  # Drive 모드: 완료된 번호 (시작 때 한 번 조회해 메모리에 두고 저장할 때마다 갱신)
 if drv.enabled:
-    _nums, DONE = drv.index(REQUIRED_PNGS, extra=[f"{n}_mask.png" for n in EDIT_FILES] + ["points.json"])
+    _nums, DONE = drv.index(REQUIRED_PNGS, extra=[f"{n}_mask.png" for n in EDIT_FILES] + ["points.json"], any_of=ONE_OF_PNGS)
     ALL_FILES = [os.path.join(SAVE_ROOT, str(n), "fix", ORIGINAL) for n in _nums]
     N = len(ALL_FILES)
 
@@ -307,7 +315,7 @@ def is_complete(i):
     if drv.enabled:
         return int(_stem(i)) in DONE
     d = _fix_dir(i)
-    return all(os.path.exists(os.path.join(d, f)) for f in REQUIRED_PNGS)
+    return masks_complete(set(os.listdir(d)) if os.path.isdir(d) else set())
 
 
 def load_fix(idx):
@@ -612,7 +620,7 @@ def _save_fix(st):
 def _save_fix_locked(st):
     """data/img/<번호>/fix/ 에 5종 마스크 PNG + points.json 저장.
     정답/직진/정지는 영역이 없어도 빈(검은) 마스크로 저장하고, 파손/배치는 그린 경우에만 저장한다.
-    fix/ 에 REQUIRED_PNGS 가 모두 있으면 '완료'로 판단해 순회 때 건너뛴다."""
+    fix/ 에 정답 마스크와 (직진 또는 정지) 마스크가 있으면 '완료'로 판단해 순회 때 건너뛴다."""
     _claim(st)
     if busy_others(st["idx"], st.get("sid")):
         gr.Warning("다른 사람도 이 이미지를 작업 중입니다 — 같은 단계를 서로 고쳤다면 나중에 저장한 쪽이 남습니다.")
@@ -646,7 +654,7 @@ def _save_fix_locked(st):
     st["dirty"], st["touched"] = False, []
     if drv.enabled:
         num = int(_stem(st["idx"]))
-        if all(os.path.exists(os.path.join(fix, f)) for f in REQUIRED_PNGS):
+        if masks_complete(set(os.listdir(fix))):
             DONE.add(num)
         else:
             DONE.discard(num)
@@ -655,9 +663,11 @@ def _save_fix_locked(st):
             gr.Warning("Drive 업로드 실패:\n" + "\n".join(drv.errors[-3:]))
             drv.errors.clear()
     summary = ", ".join(f"{EDIT_SHORT[s]} {len(faces[s])}개" for s in range(len(faces)) if faces[s])
-    todo = [EDIT_SHORT[s] for s, n in enumerate(EDIT_FILES) if n not in OPTIONAL_FILES and s not in st["visited"] and not st.get("cmp")]
+    seen = {EDIT_FILES[s] for s in st["visited"]}
+    todo = [] if st.get("cmp") else (["정답"] if "paving" not in seen else []) + (
+        ["직진 또는 정지"] if not {"straight", "stop"} & seen else [])
     if todo:
-        gr.Warning("아직 안 거친 단계: " + ", ".join(todo) + " — 세 단계(정답·직진·정지)를 모두 거쳐야 완료됩니다.")
+        gr.Warning("아직 안 거친 단계: " + ", ".join(todo) + " — 정답과 직진·정지 중 하나를 거쳐야 완료됩니다.")
     elif not summary:
         gr.Warning("영역이 하나도 없습니다 — 블록 없는 이미지로 저장했습니다.")
     return (f"저장됨: {fix}\n영역: {summary or '없음'} (마스크 / points.json — 파손·배치는 그린 경우만)"

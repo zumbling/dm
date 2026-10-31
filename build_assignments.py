@@ -12,12 +12,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("LABELER_DATA", os.path.join(os.path.dirname(HERE), "2_dataset", "data", "img"))
 PEOPLE = ["종빈", "수임", "윤진", "태희"]
 LEAD = "종빈"
-REQUIRED = ["paving_mask.png", "straight_mask.png", "stop_mask.png"]
+REQUIRED = ["paving_mask.png"]
+ONE_OF = ["straight_mask.png", "stop_mask.png"]   # 둘 중 하나만 있으면 됨 (그 이미지에 없을 수도 있어서)
 
 
 def main():
     done = {int(n) for n in os.listdir(DATA) if n.isdigit()
-            and all(os.path.exists(os.path.join(DATA, n, "fix", f)) for f in REQUIRED)}
+            and all(os.path.exists(os.path.join(DATA, n, "fix", f)) for f in REQUIRED)
+            and any(os.path.exists(os.path.join(DATA, n, "fix", f)) for f in ONE_OF)}
     with open(os.path.join(HERE, "overview.json"), encoding="utf-8") as f:
         ov = json.load(f)
     assign = {}

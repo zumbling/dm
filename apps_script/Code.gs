@@ -51,7 +51,7 @@ function fixFolder_(num, create) {
 }
 
 var ACTIONS = {
-  // 이미지가 있는 번호와 완료된 번호 (fix/ 에 required 파일이 모두 있는 번호)
+  // 이미지가 있는 번호와 완료된 번호 (fix/ 에 required 파일이 모두 있고 anyOf 중 하나 이상 있는 번호)
   index: function (r) {
     var numOf = {};
     list_("'" + P.getProperty("ROOT_ID") + "' in parents and mimeType='" + FOLDER + "' and trashed=false", "id,name")
@@ -65,13 +65,17 @@ var ACTIONS = {
     list_("name='original.jpeg' and trashed=false", "parents").forEach(function (f) {
       (f.parents || []).forEach(function (p) { if (fixNum[p] !== undefined) have[fixNum[p]] = true; });
     });
-    var q = "(" + r.required.map(function (n) { return "name='" + n + "'"; }).join(" or ") + ") and trashed=false";
+    var all = r.required.concat(r.anyOf || []);
+    var q = "(" + all.map(function (n) { return "name='" + n + "'"; }).join(" or ") + ") and trashed=false";
     list_(q, "name,parents").forEach(function (f) {
       (f.parents || []).forEach(function (p) {
         if (fixNum[p] !== undefined) { cnt[fixNum[p]] = cnt[fixNum[p]] || {}; cnt[fixNum[p]][f.name] = 1; }
       });
     });
-    var done = Object.keys(cnt).filter(function (n) { return Object.keys(cnt[n]).length === r.required.length; }).map(Number);
+    var done = Object.keys(cnt).filter(function (n) {
+      var has = function (x) { return cnt[n][x] === 1; };
+      return r.required.every(has) && (!(r.anyOf && r.anyOf.length) || r.anyOf.some(has));
+    }).map(Number);
     return { nums: Object.keys(have).map(Number), done: done };
   },
 
