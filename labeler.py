@@ -15,6 +15,7 @@ import argparse
 import copy
 import csv
 import functools
+import io
 import json
 import math
 import re
@@ -550,6 +551,12 @@ def ds_next_step(st, dirty=False, save=False):
 
 
 def _save_fix(st):
+    """같은 번호를 두 화면이 동시에 저장하거나, 저장 도중 Drive 에서 받은 파일이 끼어들지 않게 번호별로 잠그고 저장한다."""
+    with drv.lock(int(_stem(st["idx"]))):
+        return _save_fix_locked(st)
+
+
+def _save_fix_locked(st):
     """data/img/<번호>/fix/ 에 5종 마스크 PNG + points.json 저장.
     정답/직진/정지는 영역이 없어도 빈(검은) 마스크로 저장하고, 파손/배치는 그린 경우에만 저장한다.
     fix/ 에 REQUIRED_PNGS 가 모두 있으면 '완료'로 판단해 순회 때 건너뛴다."""
@@ -573,14 +580,16 @@ def _save_fix(st):
         required = EDIT_FILES[s] not in OPTIONAL_FILES
         # 정답·직진·정지는 영역이 없어도 그 단계를 거쳤으면 빈 마스크로 저장한다. 거치지 않은 단계는 저장하지 않아 '미완료'로 남는다.
         if fs or (required and s in st["visited"]):
-            m.save(mpath)
+            buf = io.BytesIO()
+            m.save(buf, format="PNG")
+            drv.write_file(mpath, buf.getvalue())
         elif not required and os.path.exists(mpath):
             os.remove(mpath)  # 파손/배치를 지웠다면 예전 마스크 파일도 정리
             removed.append(os.path.basename(mpath))
-    with open(os.path.join(fix, "points.json"), "w", encoding="utf-8") as f:
-        json.dump({"image_size": [w_, h],
-                   "steps": {EDIT_FILES[s]: {**st["data"][s], "polygons": faces[s]} for s in range(len(EDIT_FILES))}},
-                  f, ensure_ascii=False)
+    drv.write_file(os.path.join(fix, "points.json"), json.dumps(
+        {"image_size": [w_, h],
+         "steps": {EDIT_FILES[s]: {**st["data"][s], "polygons": faces[s]} for s in range(len(EDIT_FILES))}},
+        ensure_ascii=False).encode("utf-8"))  # 쓰는 도중에 다른 화면이 반쯤 쓰인 파일을 읽지 않게
     st["dirty"], st["touched"] = False, []
     if drv.enabled:
         num = int(_stem(st["idx"]))
