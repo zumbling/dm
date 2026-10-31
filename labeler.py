@@ -778,6 +778,8 @@ fieldset .wrap { gap: 6px !important; }
 button[role="tab"] { font-weight: 600 !important; color: #7d7479 !important; padding: 10px 16px !important; }
 button[role="tab"][aria-selected="true"] { color: #aa4d6b !important; border-bottom: 2px solid #e47f9a !important; }
 .click-ack { position: fixed; width: 18px; height: 18px; border-radius: 50%; border: 2px solid #e47f9a; background: rgba(228,127,154,.35); pointer-events: none; z-index: 9999; }
+/* 점을 찍을 때마다 머리말(번호·담당자 그림)이 흐려졌다 돌아오는 깜빡임 방지: 로딩 중 흐리게 하는 기본 효과를 끈다 */
+.head .html-container, .head .html-container.pending { opacity: 1 !important; transition: none !important; }
 /* 담당자 */
 .head-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .owner { display: flex; align-items: center; gap: 10px; padding: 3px 14px 3px 3px; background: #fff; border: 1px solid #ece6e9; border-radius: 10px; }
