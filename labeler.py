@@ -180,6 +180,24 @@ def _orig_names():
         return {}
 
 
+try:
+    with open(os.path.join(HERE, "damage_boxes.json"), encoding="utf-8") as _f:
+        DAMAGE_BOXES = json.load(_f)   # 번호 -> {size: [원본 폭, 높이], boxes: [[종류, x, y, w, h]]}
+except (OSError, ValueError):
+    DAMAGE_BOXES = {}
+
+
+def _saved_boxes(i):
+    """damage_boxes.json 에서 읽은 파손 박스 (원본 JSON 과 같은 형식). 번호가 overview.json 에 있는데 박스가 없으면 파손 박스 없음([])."""
+    num = _stem(i)
+    e = DAMAGE_BOXES.get(num)
+    if e is None:
+        return [] if DAMAGE_BOXES and num in OVERVIEW else None
+    h, w_ = load_np(ALL_FILES[i]).shape[:2]
+    sx, sy = w_ / e["size"][0], h / e["size"][1]
+    return [(k, [x * sx, y * sy, bw * sx, bh * sy]) for k, x, y, bw, bh in e["boxes"]]
+
+
 @functools.lru_cache(maxsize=64)
 def json_damage_boxes(i):
     """이미지 i 의 AI Hub JSON 파손 박스 [(종류, [x, y, w, h])] (원본 이미지 좌표). JSON 을 못 찾으면 None."""
@@ -188,7 +206,7 @@ def json_damage_boxes(i):
     if not path or not os.path.exists(path):  # 폴더에 없으면 data/img/<번호>/ 에 옮겨둔 JSON 을 쓴다
         path = os.path.join(SAVE_ROOT, _stem(i), f"{orig}.json") if orig else None
     if not path or not os.path.exists(path):
-        return None
+        return _saved_boxes(i)  # 원본 JSON 이 없는 서버(Drive·Render)는 build_overview.py 가 만든 좌표 파일을 쓴다
     with open(path, encoding="utf-8") as f:
         j = json.load(f)
     h, w_ = load_np(ALL_FILES[i]).shape[:2]
