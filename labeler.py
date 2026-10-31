@@ -777,6 +777,7 @@ fieldset .wrap { gap: 6px !important; }
 /* 탭 */
 button[role="tab"] { font-weight: 600 !important; color: #7d7479 !important; padding: 10px 16px !important; }
 button[role="tab"][aria-selected="true"] { color: #aa4d6b !important; border-bottom: 2px solid #e47f9a !important; }
+.click-ack { position: fixed; width: 18px; height: 18px; border-radius: 50%; border: 2px solid #e47f9a; background: rgba(228,127,154,.35); pointer-events: none; z-index: 9999; }
 /* 담당자 */
 .head-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .owner { display: flex; align-items: center; gap: 10px; padding: 3px 14px 3px 3px; background: #fff; border: 1px solid #ece6e9; border-radius: 10px; }
@@ -811,6 +812,31 @@ table thead th { background: #fff7f9 !important; color: #4a3f45 !important; font
 table tbody tr:hover td { background: #fff7f9 !important; }
 /* 아코디언 */
 .gradio-container .label-wrap { font-weight: 600; color: #4a3f45; }"""
+
+
+# 클릭한 자리에 바로 표시를 띄워 서버 응답을 기다리는 동안에도 클릭이 접수됐음을 보여준다 (서버 응답으로 화면이 바뀌면 사라진다)
+JS_CLICK_ACK = """() => {
+  if (window.__clickAck) return; window.__clickAck = true;
+  const clear = () => document.querySelectorAll('.click-ack').forEach(n => n.remove());
+  document.addEventListener('click', (e) => {
+    const img = e.target.closest('#img_edit img, #img_edit_cmp img');
+    if (!img) return;
+    const host = img.closest('#img_edit, #img_edit_cmp');
+    host.__ackSrc = img.src;  // 이 이미지가 새 이미지로 바뀌면(서버 응답 도착) 표시를 지운다
+    const dot = document.createElement('div');
+    dot.className = 'click-ack';
+    dot.style.left = (e.clientX - 9) + 'px'; dot.style.top = (e.clientY - 9) + 'px';
+    document.body.appendChild(dot);
+    if (!host.__ackObs) {
+      host.__ackObs = new MutationObserver(() => {
+        const cur = host.querySelector('img');
+        if (!cur || cur.src !== host.__ackSrc) clear();
+      });
+      host.__ackObs.observe(host, {subtree: true, childList: true, attributes: true, attributeFilter: ['src']});
+    }
+    setTimeout(clear, 8000);
+  }, true);
+}"""
 
 
 def img_tools(elem_id, filename):
@@ -988,7 +1014,7 @@ def ov_pick(evt: gr.SelectData):
     return info, items
 
 
-with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS) as demo:
+with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_CLICK_ACK) as demo:
     _where = "Google Drive 연동" if drv.enabled else html.escape(str(SAVE_ROOT))
     gr.HTML('<div class="app-header"><span class="brand">점자블록 <b>라벨링</b></span>'
             + (f'<span class="meta">{N}장 · {_where}</span></div>' if N else '</div>')
