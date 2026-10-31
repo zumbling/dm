@@ -373,8 +373,26 @@ def _claim(st):
         _busy.setdefault(num, {})[key] = time.time()
 
 
+def pick_who(who, request: gr.Request):
+    """캐릭터를 골랐을 때: 그 사람의 첫 미완료 이미지로."""
+    sid = request.session_hash
+    if who:
+        _WHO[sid] = who
+    return go_mine(request)
+
+
+def go_mine(request: gr.Request):
+    sid = request.session_hash
+    j = _first_mine(sid)
+    if j is None:
+        gr.Info("담당 번호를 모두 완료했습니다." if _WHO.get(sid) else "먼저 캐릭터를 골라 주세요.")
+        j = _find_incomplete(0, 1, sid) or 0
+    return _goto(None, j, cmp=False, sid=sid)
+
+
 def _release(sid):
     """브라우저 창을 닫으면 그 세션의 표시를 모두 푼다."""
+    _WHO.pop(sid, None)
     with _busy_lock:
         for n in list(_busy):
             _busy[n] = {k: t for k, t in _busy[n].items() if k[0] != sid}
@@ -407,6 +425,18 @@ try:
 except (OSError, ValueError):
     ASSIGN = {}
 PEOPLE = ["수임", "윤진", "태희", "종빈"]  # 전체보기 카드·담당 필터 표시 순서
+_WHO = {}   # 브라우저 세션 -> 이 세션이 고른 사람 (처음 접속 때 캐릭터를 눌러 정한다. 로그인이 아니라 자기 선택)
+
+
+def _first_mine(sid):
+    """고른 사람의 담당 번호 중 완료되지 않았고 다른 사람이 작업 중이지 않은 첫 이미지. 고른 사람이 없거나 다 끝났으면 None."""
+    who = _WHO.get(sid)
+    if not who:
+        return None
+    for i in range(N):
+        if ASSIGN.get(_stem(i)) == who and not is_complete(i) and not busy_others(i, sid):
+            return i
+    return None
 
 
 @functools.lru_cache(maxsize=None)
@@ -443,7 +473,9 @@ def ds_head(st):
         cur += f" · 다른 사람이 작업 중{f' ({others}명)' if others > 1 else ''}" if others else ""
         title = f"이미지 {st['idx'] + 1} / {N} · {num}번 · {cur}"
         sub = f"완료 {done}장 · 남음 {N - done}장 · 저장: <code>data/img/{num}/fix/</code>"
-    return f'<div class="head-row"><div class="head-main"><h3>{title}</h3><p>{sub}</p></div>{owner_badge(num)}</div>'
+    owner, who = ASSIGN.get(str(num)), _WHO.get(st.get("sid"))
+    alien = f'<span class="alien" data-owner="{owner}" data-num="{num}" hidden></span>' if who and owner and owner != who else ""
+    return f'<div class="head-row"><div class="head-main"><h3>{title}</h3><p>{sub}</p></div>{owner_badge(num)}{alien}</div>'
 
 
 def _ds_out(st, extra="", head=False, radios=False):
@@ -694,14 +726,20 @@ def _goto(st, idx, extra="", warn=True, cmp=False, sid=None):
 
 
 def _find(st, start, direction):
-    """다음/이전 이미지 번호 (완료 여부와 상관없이 전체를 순서대로). 범위를 벗어나면 None."""
+    """다음/이전 이미지 번호 (완료 여부와 상관없이 순서대로). 캐릭터를 고른 사람은 자기 담당 번호만 순회한다 (남의 번호는 번호 이동·전체보기로).
+    범위를 벗어나면 None."""
+    who = None if st.get("cmp") else _WHO.get(st.get("sid"))
+    while who and 0 <= start < N and ASSIGN.get(_stem(start), who) != who:
+        start += direction
     return start if 0 <= start < N else None
 
 
 def ds_init(cmp=False, sid=None):
     """시작하자마자: 처음 이미지부터 (완료됐거나 다른 사람이 작업 중인 이미지를 건너뛰고 첫 미완료 이미지부터)."""
     _need_images()
-    j = _find_incomplete(0, 1, sid)  # 두 탭 모두 같은 이미지(첫 미완료)에서 시작
+    j = _first_mine(sid)  # 캐릭터를 고른 사람은 자기 담당의 첫 미완료부터
+    if j is None:
+        j = _find_incomplete(0, 1, sid)  # 두 탭 모두 같은 이미지(첫 미완료)에서 시작
     return _goto(None, 0 if j is None else j, "" if j is not None else "남은 이미지가 없습니다 (모두 완료됐거나 다른 사람이 작업 중).",
                  cmp=cmp, sid=sid)
 
@@ -808,6 +846,24 @@ button[role="tab"][aria-selected="true"] { color: #aa4d6b !important; border-bot
 .click-ack { position: fixed; width: 18px; height: 18px; border-radius: 50%; border: 2px solid #e47f9a; background: rgba(228,127,154,.35); pointer-events: none; z-index: 9999; }
 /* 점을 찍을 때마다 머리말(번호·담당자 그림)이 흐려졌다 돌아오는 깜빡임 방지: 로딩 중 흐리게 하는 기본 효과를 끈다 */
 .head .html-container, .head .html-container.pending { opacity: 1 !important; transition: none !important; }
+#who_radio, #back_btn { position: absolute !important; left: -9999px !important; width: 1px !important; height: 1px !important; overflow: hidden !important; }
+.change-who { margin-left: auto; padding: 5px 12px; font-size: 12.5px; color: #6a3345; background: #fff; border: 1px solid #e4dce0; border-radius: 6px; cursor: pointer; }
+.change-who:hover { border-color: #e47f9a; background: #fff7f9; }
+.who-overlay, .alien-overlay { position: fixed; inset: 0; z-index: 10000; display: flex; align-items: center; justify-content: center; background: rgba(43, 36, 40, .55); }
+.who-box, .alien-box { background: #fff; border-radius: 14px; padding: 26px 30px; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,.25); }
+.who-box h2, .alien-box h2 { margin: 0 0 6px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: #2b2428; }
+.who-box p { margin: 0 0 16px; color: #7d7479; font-size: 14px; }
+.who-grid { display: grid; grid-template-columns: repeat(4, 150px); gap: 12px; }
+.who-card { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 8px 10px; background: #fff; border: 1px solid #ece6e9; border-radius: 10px; cursor: pointer; font-weight: 600; color: #4a3f45; }
+.who-card:hover { border-color: #e47f9a; background: #fff7f9; }
+.who-card img { width: 100%; border-radius: 7px; }
+.alien-box { max-width: 460px; border-top: 5px solid #cc6283; }
+.alien-box img { width: 100%; border-radius: 8px; margin-bottom: 14px; }
+.alien-box h3 { margin: 0 0 8px; font-size: 26px; font-weight: 800; color: #cc6283; }
+.alien-box p { margin: 0 0 16px; color: #4a3f45; font-size: 14.5px; }
+.alien-btns { display: flex; gap: 10px; justify-content: center; }
+.alien-btns button { padding: 9px 16px; font-weight: 600; border-radius: 8px; cursor: pointer; border: 1px solid #e4dce0; background: #fff; color: #3d3338; }
+.alien-btns button[data-act="back"] { background: #f3b3c4; border-color: transparent; color: #4a2230; }
 /* 담당자 */
 .head-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .owner { display: flex; align-items: center; gap: 10px; padding: 3px 14px 3px 3px; background: #fff; border: 1px solid #ece6e9; border-radius: 10px; }
@@ -867,6 +923,61 @@ JS_CLICK_ACK = """() => {
     setTimeout(clear, 8000);
   }, true);
 }"""
+
+
+def _data_uri(path):
+    try:
+        with open(path, "rb") as f:
+            return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+    except OSError:
+        return ""
+
+
+# 처음 접속하면 '누구세요?' 에서 캐릭터를 고르고(브라우저에 기억), 남의 담당 번호를 열면 경고창을 띄운다.
+# 고른 사람은 숨긴 라디오(#who_radio)를 눌러 서버에 알리고, 경고창의 '돌아가기'는 숨긴 버튼(#back_btn)을 누른다.
+_JS_WHO = """() => {
+  const PEOPLE = __PEOPLE__, ALERT = __ALERT__, KEY = 'labeler_who';
+  const esc = (t) => String(t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const mine = () => localStorage.getItem(KEY);
+  const pick = (n) => { const i = document.querySelector('#who_radio input[value="' + n + '"]'); if (i) i.click(); };
+  const picker = () => {
+    if (document.querySelector('.who-overlay')) return;
+    const o = document.createElement('div'); o.className = 'who-overlay';
+    o.innerHTML = '<div class="who-box"><h2>누구세요?</h2><p>캐릭터를 누르면 내 담당 번호의 첫 미완료 이미지부터 시작합니다.</p><div class="who-grid">'
+      + Object.keys(PEOPLE).map(n => '<button class="who-card" data-who="' + esc(n) + '"><img src="' + PEOPLE[n] + '"><span>' + esc(n) + '</span></button>').join('')
+      + '</div></div>';
+    document.body.appendChild(o);
+  };
+  const alien = (owner, num) => {
+    document.querySelectorAll('.alien-overlay').forEach(n => n.remove());
+    const o = document.createElement('div'); o.className = 'alien-overlay';
+    o.innerHTML = '<div class="alien-box"><img src="' + ALERT + '"><h2>감히 내 것을 넘보느냐?</h2><h3>네 이놈!</h3>'
+      + '<p>' + esc(num) + '번은 <b>' + esc(owner) + '</b> 담당입니다.</p>'
+      + '<div class="alien-btns"><button data-act="back">내 담당으로 돌아가기</button><button data-act="stay">그래도 계속</button></div></div>';
+    document.body.appendChild(o);
+  };
+  document.addEventListener('click', (e) => {
+    const c = e.target.closest('.who-card');
+    if (c) { localStorage.setItem(KEY, c.dataset.who); document.querySelector('.who-overlay').remove(); pick(c.dataset.who); return; }
+    if (e.target.closest('.change-who')) { picker(); return; }
+    const b = e.target.closest('.alien-btns button');
+    if (b) { document.querySelector('.alien-overlay').remove(); if (b.dataset.act === 'back') document.querySelector('#back_btn').click(); }
+  });
+  let last = '', timer = null;
+  const check = () => {
+    const w = document.querySelector('.change-who'); if (w) w.textContent = mine() ? '내 캐릭터: ' + mine() + ' · 변경' : '캐릭터 선택';
+    const head = [...document.querySelectorAll('.head')].find(h => h.offsetParent !== null);
+    const m = head && head.querySelector('.alien');
+    if (!m) { last = ''; return; }
+    const key = m.dataset.num + '|' + m.dataset.owner;
+    if (key !== last) { last = key; alien(m.dataset.owner, m.dataset.num); }
+  };
+  new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(check, 80); }).observe(document.body, {subtree: true, childList: true});
+  if (!mine()) picker();
+}"""
+JS_WHO = (_JS_WHO.replace("__PEOPLE__", json.dumps({n: person_img(n) for n in PEOPLE}, ensure_ascii=False))
+          .replace("__ALERT__", json.dumps(_data_uri(os.path.join(HERE, "assets", "alert.jpg")))))
+JS_PAGE = "() => { (%s)(); (%s)(); }" % (JS_CLICK_ACK, JS_WHO)
 
 
 def img_tools(elem_id, filename):
@@ -934,9 +1045,11 @@ def build_editor(cmp=False):
 
     DS_OUT = [ds_canvas, ds_state, ds_msg, ds_head_md, ds_step, ds_tool, ds_dirty]
     quiet = dict(show_progress="hidden", trigger_mode="multiple")  # 클릭마다 로딩 표시 없음, 빠른 연속 클릭도 모두 처리
-    def init(request: gr.Request):
+    def init(who, request: gr.Request):
+        if who:
+            _WHO[request.session_hash] = who  # 브라우저에 기억해 둔 캐릭터 (localStorage)
         return ds_init(cmp, request.session_hash)
-    demo.load(init, None, DS_OUT)
+    demo.load(init, [who_radio], DS_OUT, js="(w) => [localStorage.getItem('labeler_who') || w]")
     ds_canvas.select(ds_click, [ds_state], DS_OUT, **quiet)
     ds_step.input(ds_set_step, [ds_state, ds_step], DS_OUT, **quiet)
     ds_tool.input(ds_set_tool, [ds_state, ds_tool], DS_OUT, **quiet)
@@ -1044,9 +1157,11 @@ def ov_pick(evt: gr.SelectData):
     return info, items
 
 
-with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_CLICK_ACK) as demo:
+with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_PAGE) as demo:
     _where = "Google Drive 연동" if drv.enabled else html.escape(str(SAVE_ROOT))
-    gr.HTML('<div class="app-header"><span class="brand">점자블록 <b>라벨링</b></span>'
+    who_radio = gr.Radio(PEOPLE, value=None, elem_id="who_radio", show_label=False)  # 숨김: 브라우저가 고른 캐릭터를 서버에 알림
+    back_btn = gr.Button("내 담당으로", elem_id="back_btn")  # 숨김: 경고창의 '내 담당으로 돌아가기'
+    gr.HTML('<div class="app-header"><span class="brand">점자블록 <b>라벨링</b></span><button class="change-who">캐릭터 선택</button>'
             + (f'<span class="meta">{N}장 · {_where}</span></div>' if N else '</div>')
             + ('' if N else f'<div class="notice">이미지를 찾을 수 없습니다: <code>{html.escape(str(SAVE_ROOT))}/&lt;번호&gt;/fix/{ORIGINAL}</code></div>'))
     with gr.Tab("라벨링") as tab_label:
@@ -1075,6 +1190,8 @@ with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_
     ov_next.click(lambda k, s, w, p: ov_go(k, s, w, p, 1), OV_IN, OV_OUT)
     ov_page.submit(lambda k, s, w, p: ov_go(k, s, w, p), OV_IN, OV_OUT)
     ov_table.select(ov_pick, None, [ov_detail, ov_gallery])
+    who_radio.input(pick_who, [who_radio], out_label)
+    back_btn.click(go_mine, None, out_label)
     # 탭을 바꿀 때 보던 이미지와 디스크의 최신 저장 내용으로 맞춤
     tab_label.select(lambda a, b: ds_sync(a, b, False), [st_cmp, st_label], out_label)
     tab_cmp.select(lambda a, b: ds_sync(a, b, True), [st_label, st_cmp], out_cmp)
