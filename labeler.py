@@ -14,6 +14,7 @@ import os
 import argparse
 import copy
 import csv
+import base64
 import functools
 import html
 import io
@@ -374,16 +375,49 @@ def _touch(st):
         st["touched"].append(st["step"])
 
 
+try:
+    with open(os.path.join(HERE, "assignments.json"), encoding="utf-8") as _f:
+        ASSIGN = json.load(_f)   # 번호 -> 담당자 이름 (build_assignments.py 가 만든다)
+except (OSError, ValueError):
+    ASSIGN = {}
+PEOPLE = ["종빈", "수임", "윤진", "태희"]
+
+
+@functools.lru_cache(maxsize=None)
+def person_img(name):
+    """담당자 그림을 data URI 로 (파일 서버 설정 없이 로컬·배포 모두 같은 방식으로 보이게)."""
+    try:
+        with open(os.path.join(HERE, "assets", "people", f"{name}.jpg"), "rb") as f:
+            return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+    except OSError:
+        return ""
+
+
+def _person_tag(who):
+    img = person_img(who)
+    return '<img src="%s" alt="%s">' % (img, who) if img else ""
+
+
+def owner_badge(num):
+    who = ASSIGN.get(str(num))
+    if not who:
+        return ""
+    return f'<div class="owner">{_person_tag(who)}<span>담당 {who}</span></div>'
+
+
 def ds_head(st):
+    num = _stem(st["idx"])
     if st.get("cmp"):
-        return (f"### 이미지 {st['idx'] + 1} / {N} · `{_stem(st['idx'])}번`\n"
-                f"파란 박스 = AI Hub JSON 파손 · 저장: `data/img/{_stem(st['idx'])}/fix/damage_mask.png`")
-    done = sum(is_complete(i) for i in range(N))
-    cur = "완료" if is_complete(st["idx"]) else "미완료"
-    others = busy_others(st["idx"], st.get("sid"))
-    cur += f" · 👤 다른 사람이 작업 중{f' ({others}명)' if others > 1 else ''}" if others else ""
-    return (f"### 이미지 {st['idx'] + 1} / {N} · `{_stem(st['idx'])}번` · {cur}\n"
-            f"완료 {done}장 · 남음 {N - done}장 · 저장: `data/img/{_stem(st['idx'])}/fix/`")
+        title = f"이미지 {st['idx'] + 1} / {N} · {num}번"
+        sub = f"파란 박스 = AI Hub JSON 파손 · 저장: <code>data/img/{num}/fix/damage_mask.png</code>"
+    else:
+        done = sum(is_complete(i) for i in range(N))
+        cur = "완료" if is_complete(st["idx"]) else "미완료"
+        others = busy_others(st["idx"], st.get("sid"))
+        cur += f" · 다른 사람이 작업 중{f' ({others}명)' if others > 1 else ''}" if others else ""
+        title = f"이미지 {st['idx'] + 1} / {N} · {num}번 · {cur}"
+        sub = f"완료 {done}장 · 남음 {N - done}장 · 저장: <code>data/img/{num}/fix/</code>"
+    return f'<div class="head-row"><div class="head-main"><h3>{title}</h3><p>{sub}</p></div>{owner_badge(num)}</div>'
 
 
 def _ds_out(st, extra="", head=False, radios=False):
@@ -739,11 +773,26 @@ footer { display: none !important; }
 .app-header .brand b { color: #cc6283; font-weight: 700; }
 .app-header .meta { font-size: 13px; color: #7d7479; }
 .notice { padding: 10px 14px; border: 1px solid #f7bfcd; background: #fff7f9; border-radius: 6px; color: #6a3345; font-size: 14px; }
+fieldset .wrap { gap: 6px !important; }
 /* 탭 */
 button[role="tab"] { font-weight: 600 !important; color: #7d7479 !important; padding: 10px 16px !important; }
 button[role="tab"][aria-selected="true"] { color: #aa4d6b !important; border-bottom: 2px solid #e47f9a !important; }
+/* 담당자 */
+.head-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.owner { display: flex; align-items: center; gap: 10px; padding: 3px 14px 3px 3px; background: #fff; border: 1px solid #ece6e9; border-radius: 10px; }
+.owner img { height: 56px; border-radius: 7px; display: block; }
+.owner span { font-size: 12.5px; font-weight: 600; color: #6a3345; white-space: nowrap; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.stat { display: flex; align-items: center; gap: 12px; padding: 8px 14px 8px 8px; background: #fff; border: 1px solid #ece6e9; border-radius: 10px; }
+.stat img { height: 66px; border-radius: 7px; display: block; }
+.stat .name { font-size: 12.5px; font-weight: 600; color: #7d7479; }
+.stat .pct { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: #aa4d6b; line-height: 1.2; }
+.stat .sub { font-size: 12px; color: #7d7479; }
+.stat .bar { height: 5px; margin-top: 6px; background: #fdecf0; border-radius: 3px; overflow: hidden; }
+.stat .bar i { display: block; height: 100%; background: #e47f9a; border-radius: 3px; }
+.stat .body { flex: 1; min-width: 0; }
 /* 머리말·섹션 */
-.head h3 { margin: 0 0 2px; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.head h3 { margin: 0 0 2px; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; color: #2b2428; }
 .head p { margin: 0; color: #7d7479; font-size: 13px; }
 .section-label p { margin: 6px 0 0; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; color: #7d7479; }
 .mono textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.55; }
@@ -786,7 +835,7 @@ def build_editor(cmp=False):
     ds_state = gr.State(None)
     ds_dirty = gr.Checkbox(visible=False)  # 저장하지 않은 변경 여부 (브라우저 쪽 팝업 판단용)
     ds_save_flag = gr.Checkbox(visible=False)  # 팝업에서 '저장' 을 골랐는지
-    ds_head_md = gr.Markdown("불러오는 중...", elem_classes="head")
+    ds_head_md = gr.HTML("불러오는 중...", elem_classes="head")
     with gr.Accordion("사용법", open=False):
         if cmp:
             gr.Markdown("**파손**을 직접 그려 AI Hub JSON 의 파손 박스(파랑)와 비교합니다. `점 찍기` 로 모서리마다 점을 찍고 "
@@ -865,9 +914,10 @@ try:
 except (OSError, ValueError):
     OVERVIEW = {}
 OV_PAGE = 50
-OV_COLS = ["번호", "구분", "상태", "파손 박스", "완료", "있는 라벨"]
+OV_COLS = ["번호", "담당", "구분", "상태", "파손 박스", "완료", "있는 라벨"]
 OV_KINDS = ["전체", "파손", "정상", "미확인"]
 OV_STATES = ["전체", "완료", "미완료"]
+OV_WHO = ["전체"] + PEOPLE
 OV_CAPTION = {ORIGINAL: "원본", "points.json": "points.json", **{f"{n}_mask.png": f"{EDIT_SHORT[i]} 마스크" for i, n in enumerate(EDIT_FILES)}}
 
 
@@ -886,11 +936,26 @@ def _ov_done(num, idx):
     return int(num) in DONE if drv.enabled else is_complete(idx)
 
 
-def ov_go(kind, state, page, delta=0, reset=False):
-    """필터를 적용해 page(+delta) 쪽을 표로 만든다. 반환: 표, 안내 문구, 현재 쪽."""
+def ov_stats():
+    """담당자별 완료율 카드 (담당 번호 중 완료된 비율)."""
+    nums = {int(_stem(i)): i for i in range(N)}
+    cards = []
+    for who in PEOPLE:
+        mine = [int(n) for n, w in ASSIGN.items() if w == who]
+        done = sum(1 for n in mine if n in nums and _ov_done(n, nums[n]))
+        pct = 100 * done / len(mine) if mine else 0
+        cards.append(f'<div class="stat">{_person_tag(who)}'
+                     f'<div class="body"><div class="name">{who}</div><div class="pct">{pct:.1f}%</div>'
+                     f'<div class="sub">{done:,} / {len(mine):,}</div><div class="bar"><i style="width:{pct:.1f}%"></i></div></div></div>')
+    return '<div class="stats">' + "".join(cards) + "</div>"
+
+
+def ov_go(kind, state, who, page, delta=0, reset=False):
+    """필터를 적용해 page(+delta) 쪽을 표로 만든다. 반환: 표, 안내 문구, 현재 쪽, 담당자별 완료율."""
     nums = {int(_stem(i)): i for i in range(N)}
     rows_n = [n for n in sorted(nums)
               if (kind == "전체" or _ov_meta(n)["kind"] == kind)
+              and (who == "전체" or ASSIGN.get(str(n)) == who)
               and (state == "전체" or (_ov_done(n, nums[n]) == (state == "완료")))]
     pages = max(1, math.ceil(len(rows_n) / OV_PAGE))
     page = 1 if reset else min(max(int(page or 1) + delta, 1), pages)
@@ -898,13 +963,13 @@ def ov_go(kind, state, page, delta=0, reset=False):
     for n in rows_n[(page - 1) * OV_PAGE: page * OV_PAGE]:
         m, files = _ov_meta(n), _ov_files(n)
         dmg = m.get("damage") or []
-        rows.append([n, m["kind"], m.get("status") or "-",
+        rows.append([n, ASSIGN.get(str(n), "-"), m["kind"], m.get("status") or "-",
                      f"{len(dmg)}개 ({', '.join(sorted(set(dmg)))})" if dmg else "-",
                      "완료" if _ov_done(n, nums[n]) else "미완료",
                      " ".join(EDIT_SHORT[i] for i, e in enumerate(EDIT_FILES) if f"{e}_mask.png" in files) or "-"])
     if not OVERVIEW:
         gr.Warning("overview.json 이 없어 구분·파손 박스를 알 수 없습니다 (build_overview.py 로 만들어 두세요).")
-    return rows, f"조건에 맞는 번호 {len(rows_n)}개 · {page} / {pages} 쪽", page
+    return rows, f"조건에 맞는 번호 {len(rows_n)}개 · {page} / {pages} 쪽", page, ov_stats()
 
 
 def ov_pick(evt: gr.SelectData):
@@ -916,7 +981,7 @@ def ov_pick(evt: gr.SelectData):
     names = [ORIGINAL] + [f"{n}_mask.png" for n in EDIT_FILES]
     items = [(os.path.join(d, n), OV_CAPTION[n]) for n in names if os.path.exists(os.path.join(d, n))]
     dmg = m.get("damage") or []
-    info = (f"### {num}번 · {m['kind']} 데이터\n"
+    info = (f"### {num}번 · {m['kind']} 데이터 · 담당 {ASSIGN.get(str(num), '-')}\n"
             f"- 원본 파일: `{m.get('orig', '?')}` · AI Hub 상태: `{m.get('status') or '-'}`\n"
             f"- JSON 파손 박스: {', '.join(dmg) if dmg else '없음'}\n"
             f"- 들어 있는 파일: {', '.join(OV_CAPTION[n] for n in names + ['points.json'] if os.path.exists(os.path.join(d, n))) or '없음'}")
@@ -933,9 +998,11 @@ with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS) as dem
     with gr.Tab("파손 비교 (JSON)") as tab_cmp:
         st_cmp, out_cmp = build_editor(True)
     with gr.Tab("전체보기") as tab_ov:
+        ov_stats_html = gr.HTML(ov_stats() if N else "")
         with gr.Row():
-            ov_kind = gr.Radio(OV_KINDS, value="전체", label="구분 (원래 AI Hub 폴더)")
-            ov_state = gr.Radio(OV_STATES, value="전체", label="라벨링 상태")
+            ov_kind = gr.Radio(OV_KINDS, value="전체", label="구분 (원래 AI Hub 폴더)", scale=4)
+            ov_who = gr.Radio(OV_WHO, value="전체", label="담당", scale=5)
+            ov_state = gr.Radio(OV_STATES, value="전체", label="라벨링 상태", scale=3)
         with gr.Row(elem_classes="pager", equal_height=True):
             ov_prev = gr.Button("이전 쪽", scale=0, min_width=110)
             ov_next = gr.Button("다음 쪽", scale=0, min_width=110)
@@ -944,13 +1011,13 @@ with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS) as dem
         ov_table = gr.Dataframe(headers=OV_COLS, value=[], interactive=False, wrap=True, label="번호를 누르면 아래에 이미지가 나옵니다")
         ov_detail = gr.Markdown("표에서 번호를 누르세요.")
         ov_gallery = gr.Gallery(label="들어 있는 이미지", columns=3, height="auto", object_fit="contain")
-    OV_IN, OV_OUT = [ov_kind, ov_state, ov_page], [ov_table, ov_info, ov_page]
-    tab_ov.select(lambda k, s, p: ov_go(k, s, p), OV_IN, OV_OUT)
-    ov_kind.change(lambda k, s, p: ov_go(k, s, p, reset=True), OV_IN, OV_OUT)
-    ov_state.change(lambda k, s, p: ov_go(k, s, p, reset=True), OV_IN, OV_OUT)
-    ov_prev.click(lambda k, s, p: ov_go(k, s, p, -1), OV_IN, OV_OUT)
-    ov_next.click(lambda k, s, p: ov_go(k, s, p, 1), OV_IN, OV_OUT)
-    ov_page.submit(lambda k, s, p: ov_go(k, s, p), OV_IN, OV_OUT)
+    OV_IN, OV_OUT = [ov_kind, ov_state, ov_who, ov_page], [ov_table, ov_info, ov_page, ov_stats_html]
+    tab_ov.select(lambda k, s, w, p: ov_go(k, s, w, p), OV_IN, OV_OUT)
+    for _c in (ov_kind, ov_state, ov_who):
+        _c.change(lambda k, s, w, p: ov_go(k, s, w, p, reset=True), OV_IN, OV_OUT)
+    ov_prev.click(lambda k, s, w, p: ov_go(k, s, w, p, -1), OV_IN, OV_OUT)
+    ov_next.click(lambda k, s, w, p: ov_go(k, s, w, p, 1), OV_IN, OV_OUT)
+    ov_page.submit(lambda k, s, w, p: ov_go(k, s, w, p), OV_IN, OV_OUT)
     ov_table.select(ov_pick, None, [ov_detail, ov_gallery])
     # 탭을 바꿀 때 보던 이미지와 디스크의 최신 저장 내용으로 맞춤
     tab_label.select(lambda a, b: ds_sync(a, b, False), [st_cmp, st_label], out_label)
