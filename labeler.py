@@ -15,9 +15,12 @@ import argparse
 import copy
 import csv
 import functools
+import io
 import json
 import math
 import re
+import threading
+import time
 
 import gradio as gr
 import numpy as np
@@ -304,8 +307,8 @@ def load_fix(idx):
     return data
 
 
-def ds_new(idx, cmp=False):
-    """cmp=True: 파손 비교 화면용 (파손 단계만 편집, JSON 박스를 겹쳐 보여줌).
+def ds_new(idx, cmp=False, sid=None):
+    """cmp=True: 파손 비교 화면용 (파손 단계만 편집, JSON 박스를 겹쳐 보여줌). sid: 브라우저 세션 (작업 중 표시용).
     touched: 이번에 수정한 단계 — 저장할 때 나머지 단계는 디스크의 최신 내용을 써서 다른 화면의 저장을 덮어쓰지 않는다."""
     if drv.enabled:
         drv.pull(int(_stem(idx)), max_age=120)  # 이 번호의 fix/ 를 Drive 에서 내려받는다 (미리 받아 둔 건 건너뜀)
@@ -316,8 +319,46 @@ def ds_new(idx, cmp=False):
     # visited: 거쳐 간 단계. 이미 마스크가 저장된 단계는 거친 것으로 본다 (기존 데이터는 그대로 완료 유지).
     visited = sorted({first} | {s for s, n in enumerate(EDIT_FILES)
                                 if os.path.exists(os.path.join(_fix_dir(idx), f"{n}_mask.png"))})
-    return {"idx": idx, "step": first, "tool": 0, "sel": None, "dirty": False, "touched": [],
-            "locked": locked, "cmp": cmp, "data": data, "visited": visited}
+    st = {"idx": idx, "step": first, "tool": 0, "sel": None, "dirty": False, "touched": [],
+          "locked": locked, "cmp": cmp, "data": data, "visited": visited, "sid": sid}
+    _claim(st)
+    return st
+
+
+# 작업 중 표시: 번호 -> {(세션, cmp): 마지막 조작 시각}. 서버 프로세스 하나 안에서만 공유된다.
+# 같은 브라우저 페이지(라벨링·파손 비교 탭)는 같은 세션이라 서로를 '다른 사람'으로 보지 않는다.
+BUSY_TTL = 600  # 이 시간(초) 동안 아무 조작이 없으면 자리를 비운 것으로 본다 (창을 닫으면 바로 풀림)
+_busy = {}
+_busy_lock = threading.Lock()
+
+
+def _claim(st):
+    """이 화면이 지금 보는 번호를 '작업 중' 으로 표시한다 (이전에 보던 번호의 표시는 푼다)."""
+    if not st or not st.get("sid"):
+        return
+    key, num = (st["sid"], bool(st.get("cmp"))), _stem(st["idx"])
+    with _busy_lock:
+        for n in [n for n, h in _busy.items() if key in h and n != num]:
+            del _busy[n][key]
+            if not _busy[n]:
+                del _busy[n]
+        _busy.setdefault(num, {})[key] = time.time()
+
+
+def _release(sid):
+    """브라우저 창을 닫으면 그 세션의 표시를 모두 푼다."""
+    with _busy_lock:
+        for n in list(_busy):
+            _busy[n] = {k: t for k, t in _busy[n].items() if k[0] != sid}
+            if not _busy[n]:
+                del _busy[n]
+
+
+def busy_others(i, sid):
+    """i번째 이미지를 지금 다른 세션 몇 곳이 열어 두고 있는지."""
+    now = time.time()
+    with _busy_lock:
+        return len({k[0] for k, t in _busy.get(_stem(i), {}).items() if k[0] != sid and now - t < BUSY_TTL})
 
 
 def _unlock(st):
@@ -338,12 +379,15 @@ def ds_head(st):
                 f"파란 박스 = AI Hub JSON 파손 · 저장: `data/img/{_stem(st['idx'])}/fix/damage_mask.png`")
     done = sum(is_complete(i) for i in range(N))
     cur = "✅ 완료" if is_complete(st["idx"]) else "⬜ 미완료"
+    others = busy_others(st["idx"], st.get("sid"))
+    cur += f" · 👤 다른 사람이 작업 중{f' ({others}명)' if others > 1 else ''}" if others else ""
     return (f"### 이미지 {st['idx'] + 1} / {N} · `{_stem(st['idx'])}번` · {cur}\n"
             f"완료 {done}장 · 남음 {N - done}장 · 저장: `data/img/{_stem(st['idx'])}/fix/`")
 
 
 def _ds_out(st, extra="", head=False, radios=False):
     """편집 화면 갱신값 7개: 캔버스, 상태, 상태 문구, 머리말, 단계 라디오, 도구 라디오, 저장 안 한 변경 여부."""
+    _claim(st)  # 조작할 때마다 '작업 중' 시각을 갱신
     msg = ((extra + "\n" if extra else "") + edit_status(st) + ("\n" + cmp_text(st) if st.get("cmp") else "")
            + ("\n● 저장하지 않은 변경이 있습니다" if st["dirty"] else ""))
     return (draw_edit(load_np(ALL_FILES[st["idx"]]), st), st, msg,
@@ -507,9 +551,18 @@ def ds_next_step(st, dirty=False, save=False):
 
 
 def _save_fix(st):
+    """같은 번호를 두 화면이 동시에 저장하거나, 저장 도중 Drive 에서 받은 파일이 끼어들지 않게 번호별로 잠그고 저장한다."""
+    with drv.lock(int(_stem(st["idx"]))):
+        return _save_fix_locked(st)
+
+
+def _save_fix_locked(st):
     """data/img/<번호>/fix/ 에 5종 마스크 PNG + points.json 저장.
     정답/직진/정지는 영역이 없어도 빈(검은) 마스크로 저장하고, 파손/배치는 그린 경우에만 저장한다.
     fix/ 에 REQUIRED_PNGS 가 모두 있으면 '완료'로 판단해 순회 때 건너뛴다."""
+    _claim(st)
+    if busy_others(st["idx"], st.get("sid")):
+        gr.Warning("다른 사람도 이 이미지를 작업 중입니다 — 같은 단계를 서로 고쳤다면 나중에 저장한 쪽이 남습니다.")
     img = load_np(ALL_FILES[st["idx"]])
     h, w_ = img.shape[:2]
     fresh = load_fix(st["idx"])  # 수정하지 않은 단계는 디스크의 최신 내용 유지 (다른 화면에서 저장한 것 보호)
@@ -527,14 +580,16 @@ def _save_fix(st):
         required = EDIT_FILES[s] not in OPTIONAL_FILES
         # 정답·직진·정지는 영역이 없어도 그 단계를 거쳤으면 빈 마스크로 저장한다. 거치지 않은 단계는 저장하지 않아 '미완료'로 남는다.
         if fs or (required and s in st["visited"]):
-            m.save(mpath)
+            buf = io.BytesIO()
+            m.save(buf, format="PNG")
+            drv.write_file(mpath, buf.getvalue())
         elif not required and os.path.exists(mpath):
             os.remove(mpath)  # 파손/배치를 지웠다면 예전 마스크 파일도 정리
             removed.append(os.path.basename(mpath))
-    with open(os.path.join(fix, "points.json"), "w", encoding="utf-8") as f:
-        json.dump({"image_size": [w_, h],
-                   "steps": {EDIT_FILES[s]: {**st["data"][s], "polygons": faces[s]} for s in range(len(EDIT_FILES))}},
-                  f, ensure_ascii=False)
+    drv.write_file(os.path.join(fix, "points.json"), json.dumps(
+        {"image_size": [w_, h],
+         "steps": {EDIT_FILES[s]: {**st["data"][s], "polygons": faces[s]} for s in range(len(EDIT_FILES))}},
+        ensure_ascii=False).encode("utf-8"))  # 쓰는 도중에 다른 화면이 반쯤 쓰인 파일을 읽지 않게
     st["dirty"], st["touched"] = False, []
     if drv.enabled:
         num = int(_stem(st["idx"]))
@@ -556,19 +611,23 @@ def _save_fix(st):
             + (f"\n⬜ 미완료 — 남은 단계: {', '.join(todo)}" if todo else ""))
 
 
-def _find_incomplete(start, direction):
+def _find_incomplete(start, direction, sid=None):
+    """완료되지 않았고 다른 사람이 작업 중이지 않은 첫 이미지."""
     i = start
     while 0 <= i < N:
-        if not is_complete(i):
+        if not is_complete(i) and not busy_others(i, sid):
             return i
         i += direction
     return None
 
 
-def _goto(st, idx, extra="", warn=True, cmp=False):
+def _goto(st, idx, extra="", warn=True, cmp=False, sid=None):
     if warn and st and st.get("dirty"):
         gr.Warning("저장하지 않은 변경이 있어 버려졌습니다.")
-    return _ds_out(ds_new(idx, cmp), extra, head=True, radios=True)
+    sid = sid or (st or {}).get("sid")
+    if busy_others(idx, sid):
+        gr.Warning(f"{_stem(idx)}번은 다른 사람이 작업 중입니다.")
+    return _ds_out(ds_new(idx, cmp, sid), extra, head=True, radios=True)
 
 
 def _find(st, start, direction):
@@ -576,11 +635,12 @@ def _find(st, start, direction):
     return start if 0 <= start < N else None
 
 
-def ds_init(cmp=False):
-    """시작하자마자: 처음 이미지부터 (라벨링 화면은 이미 완료된 이미지를 건너뛰고 첫 미완료 이미지부터)."""
+def ds_init(cmp=False, sid=None):
+    """시작하자마자: 처음 이미지부터 (완료됐거나 다른 사람이 작업 중인 이미지를 건너뛰고 첫 미완료 이미지부터)."""
     _need_images()
-    j = _find_incomplete(0, 1)  # 두 탭 모두 같은 이미지(첫 미완료)에서 시작
-    return _goto(None, 0 if j is None else j, "" if j is not None else "모든 이미지가 완료되었습니다.", cmp=cmp)
+    j = _find_incomplete(0, 1, sid)  # 두 탭 모두 같은 이미지(첫 미완료)에서 시작
+    return _goto(None, 0 if j is None else j, "" if j is not None else "남은 이미지가 없습니다 (모두 완료됐거나 다른 사람이 작업 중).",
+                 cmp=cmp, sid=sid)
 
 
 def ds_prev(st, dirty=False, save=False):
@@ -719,7 +779,9 @@ def build_editor(cmp=False):
 
     DS_OUT = [ds_canvas, ds_state, ds_msg, ds_head_md, ds_step, ds_tool, ds_dirty]
     quiet = dict(show_progress="hidden", trigger_mode="multiple")  # 클릭마다 로딩 표시 없음, 빠른 연속 클릭도 모두 처리
-    demo.load(lambda: ds_init(cmp), None, DS_OUT)
+    def init(request: gr.Request):
+        return ds_init(cmp, request.session_hash)
+    demo.load(init, None, DS_OUT)
     ds_canvas.select(ds_click, [ds_state], DS_OUT, **quiet)
     ds_step.input(ds_set_step, [ds_state, ds_step], DS_OUT, **quiet)
     ds_tool.input(ds_set_tool, [ds_state, ds_tool], DS_OUT, **quiet)
@@ -741,7 +803,7 @@ def ds_sync(src, dst, cmp):
     """탭을 열면 다른 탭이 보던 이미지로 맞춘다 (이 탭에 저장 안 한 변경이 있으면 그대로 둔다)."""
     if src is None or (dst is not None and dst["dirty"]):
         return (gr.skip(),) * 7
-    return _goto(None, src["idx"], cmp=cmp)
+    return _goto(None, src["idx"], cmp=cmp, sid=src.get("sid"))
 
 with gr.Blocks(title="점자블록 데이터셋 라벨링", css=PAGE_CSS) as demo:
     gr.Markdown("## 점자블록 데이터셋 라벨링")
@@ -754,6 +816,10 @@ with gr.Blocks(title="점자블록 데이터셋 라벨링", css=PAGE_CSS) as dem
     # 탭을 바꿀 때 보던 이미지와 디스크의 최신 저장 내용으로 맞춤
     tab_label.select(lambda a, b: ds_sync(a, b, False), [st_cmp, st_label], out_label)
     tab_cmp.select(lambda a, b: ds_sync(a, b, True), [st_label, st_cmp], out_cmp)
+
+    def _on_close(request: gr.Request):
+        _release(request.session_hash)
+    demo.unload(_on_close)  # 창을 닫으면 '작업 중' 표시를 바로 푼다
 
 
 if __name__ == "__main__":

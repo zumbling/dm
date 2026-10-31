@@ -42,6 +42,23 @@ _creds = None
 _pool = ThreadPoolExecutor(max_workers=1)   # 저장 업로드를 화면과 따로 처리
 errors = []                                 # 업로드 실패 메시지
 fix_ids = {}                                # 번호 -> fix 폴더 ID
+_num_locks = {}                             # 번호 -> 잠금: 저장과 내려받기가 같은 번호 파일을 동시에 쓰지 않게
+_guard = threading.Lock()
+_pending = {}                               # 번호 -> 아직 Drive 에 올리지 못한 저장 수
+_saved = {}                                 # 번호 -> 마지막으로 로컬에 저장한 시각
+
+
+def lock(num):
+    """번호별 잠금. 저장(labeler._save_fix)과 내려받기(_pull)가 함께 쓴다."""
+    with _guard:
+        return _num_locks.setdefault(num, threading.Lock())
+
+
+def write_file(p, data):
+    """반쯤 쓰인 파일이 읽히지 않게 임시 파일에 다 쓴 뒤 바꿔치기한다."""
+    with open(p + ".part", "wb") as fh:
+        fh.write(data)
+    os.replace(p + ".part", p)
 
 
 def _credentials():
@@ -168,46 +185,49 @@ def prefetch(*nums):
 
 
 def _pull(num):
-    """<번호>/fix/ 를 CACHE 로 내려받는다. 원본 이미지는 이미 받았으면 건너뛰고, 마스크·json 은 항상 최신으로."""
+    """<번호>/fix/ 를 CACHE 로 내려받는다. 원본 이미지는 이미 받았으면 건너뛰고, 마스크·json 은 항상 최신으로.
+    받는 동안 이 번호를 저장했거나 아직 업로드 중이면 마스크·json 은 쓰지 않는다 (Drive 의 옛 파일이 방금 저장한 걸 덮지 않게)."""
     dst = os.path.join(CACHE, str(num), "fix")
     os.makedirs(dst, exist_ok=True)
+    started = time.time()
     if GAS_URL:
         res = _gas("pull", num=num, orig=not os.path.exists(os.path.join(dst, "original.jpeg")))
-        for f in res["files"]:
+        got, remote = [(f["name"], base64.b64decode(f["b64"])) for f in res["files"]], set(res["names"])
+    else:
+        from googleapiclient.http import MediaIoBaseDownload
+        fid = fix_ids.get(num)
+        if not fid:
+            return
+        got, remote = [], set()
+        for f in _list(f"'{fid}' in parents and trashed=false", "id,name,size,mimeType"):
+            if f["mimeType"] == FOLDER:
+                continue
+            remote.add(f["name"])
             p = os.path.join(dst, f["name"])
-            with open(p + ".part", "wb") as fh:
-                fh.write(base64.b64decode(f["b64"]))
-            os.replace(p + ".part", p)
-        _cleanup(dst, set(res["names"]))
-        return
-    from googleapiclient.http import MediaIoBaseDownload
-    fid = fix_ids.get(num)
-    if not fid:
-        return
-    for f in _list(f"'{fid}' in parents and trashed=false", "id,name,size,mimeType"):
-        if f["mimeType"] == FOLDER:
-            continue
-        p = os.path.join(dst, f["name"])
-        if f["name"] == "original.jpeg" and os.path.exists(p) and os.path.getsize(p) == int(f.get("size", -1)):
-            continue
-        req = _svc().files().get_media(fileId=f["id"], supportsAllDrives=True)
-        with io.FileIO(p + ".part", "wb") as fh:
-            dl, ok = MediaIoBaseDownload(fh, req), False
+            if f["name"] == "original.jpeg" and os.path.exists(p) and os.path.getsize(p) == int(f.get("size", -1)):
+                continue
+            buf = io.BytesIO()
+            dl, ok = MediaIoBaseDownload(buf, _svc().files().get_media(fileId=f["id"], supportsAllDrives=True)), False
             while not ok:
                 _, ok = dl.next_chunk()
-        os.replace(p + ".part", p)
-    # 다른 곳에서 지워진 마스크가 캐시에 남아 있지 않게 정리
-    _cleanup(dst, {f["name"] for f in _list(f"'{fid}' in parents and trashed=false", "name")})
+            got.append((f["name"], buf.getvalue()))
+    with lock(num):
+        local_newer = _pending.get(num) or _saved.get(num, 0) >= started
+        for name, data in got:
+            if name == "original.jpeg" or not local_newer:
+                write_file(os.path.join(dst, name), data)
+        if not local_newer:
+            _cleanup(dst, remote)  # 다른 곳에서 지워진 마스크가 캐시에 남아 있지 않게 정리
 
 
 def _push(num, names, removed):
-    from googleapiclient.http import MediaFileUpload
     try:
         if GAS_URL:
             files = [{"name": n, "b64": base64.b64encode(open(os.path.join(CACHE, str(num), "fix", n), "rb").read()).decode()}
                      for n in names]
             _gas("push", num=num, files=files, removed=removed)
             return
+        from googleapiclient.http import MediaFileUpload
         fid = fix_ids.get(num)
         if not fid:
             parent = next((f["id"] for f in _list(f"'{ROOT_ID}' in parents and name='{num}' and mimeType='{FOLDER}' and trashed=false", "id")), None)
@@ -229,8 +249,15 @@ def _push(num, names, removed):
                 _svc().files().delete(fileId=exist[n], supportsAllDrives=True).execute()
     except Exception as e:  # 백그라운드라서 화면에 직접 못 띄우므로 모아 둔다
         errors.append(f"{num}번 업로드 실패: {e}")
+    finally:
+        with _guard:
+            _pending[num] -= 1
 
 
 def push_async(num, names, removed=()):
-    """저장한 파일들을 백그라운드로 Drive 에 올린다 (names: 올릴 파일, removed: Drive 에서 지울 파일)."""
+    """저장한 파일들을 백그라운드로 Drive 에 올린다 (names: 올릴 파일, removed: Drive 에서 지울 파일).
+    올리기를 마칠 때까지 이 번호는 Drive 에서 다시 받지 않는다."""
+    with _guard:
+        _pending[num] = _pending.get(num, 0) + 1
+        _saved[num] = time.time()
     _pool.submit(_push, num, list(names), list(removed))
