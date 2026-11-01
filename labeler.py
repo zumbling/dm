@@ -614,6 +614,23 @@ def ds_undo_line(st):
     return _ds_out(st)
 
 
+def ds_copy_paving(st):
+    """정답(점자 영역) 단계의 점·선을 현재 단계(직진/정지)로 그대로 복사한다 — 블록이 전부 직진이거나 전부 정지일 때.
+    정답 단계는 저장 안 한 화면 상태를 쓴다. 현재 단계에 그린 것은 정답 영역으로 바뀐다."""
+    _need_state(st)
+    st = copy.deepcopy(st)
+    if st["step"] not in (3, 4):
+        return _ds_out(st, "정답 영역 불러오기는 ④ 직진 / ⑤ 정지 단계에서만 쓸 수 있습니다.")
+    src = st["data"][0]
+    if not find_faces(src["pts"], src["lines"])[0]:
+        return _ds_out(st, "정답(점자 영역) 단계에 닫힌 영역이 없습니다. 정답 영역을 먼저 그려 주세요.")
+    _unlock(st)
+    st["data"][st["step"]] = copy.deepcopy(src)
+    st["sel"] = None
+    _touch(st)
+    return _ds_out(st, f"정답 영역을 {EDIT_SHORT[st['step']]} 영역으로 불러왔습니다. 필요하면 지우개로 고친 뒤 저장하세요.")
+
+
 def ds_clear_step(st):
     """현재 단계를 빈 상태로 초기화."""
     _need_state(st)
@@ -1023,6 +1040,7 @@ def build_editor(cmp=False):
     with gr.Row():
         ds_step = gr.Radio([EDIT_STEPS[1]] if cmp else EDIT_STEPS, value=EDIT_STEPS[1 if cmp else 0], label="단계", scale=5)
         ds_tool = gr.Radio(EDIT_TOOLS, value=EDIT_TOOLS[0], label="도구", scale=3)
+        ds_copy_btn = gr.Button("정답 영역 불러오기\n(직진·정지 단계)", size="sm", scale=1, min_width=120)
     with gr.Row():
         with gr.Column(scale=4):
             ds_canvas = gr.Image(label="편집 화면", show_label=False, interactive=False, elem_id="img_edit" + sfx, **IMG_NO_OVERLAY)
@@ -1056,6 +1074,7 @@ def build_editor(cmp=False):
     ds_undo_pt_btn.click(ds_undo_point, [ds_state], DS_OUT, **quiet)
     ds_undo_ln_btn.click(ds_undo_line, [ds_state], DS_OUT, **quiet)
     ds_clear_btn.click(ds_clear_step, [ds_state], DS_OUT, **quiet)
+    ds_copy_btn.click(ds_copy_paving, [ds_state], DS_OUT, **quiet)
     ds_reset_btn.click(ds_reset_step, [ds_state], DS_OUT, **quiet)
     if not cmp:
         ds_nextstep_btn.click(ds_next_step, [ds_state, ds_dirty, ds_save_flag], DS_OUT, js=JS_ASK_STEP, **quiet)
