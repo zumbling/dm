@@ -1160,20 +1160,18 @@ def ov_go(kind, state, who, page, delta=0, reset=False):
     return rows, f"조건에 맞는 번호 {len(rows_n)}개 · {page} / {pages} 쪽", page, ov_stats()
 
 
-def ov_pick(evt: gr.SelectData):
-    """표에서 번호를 누르면 그 번호의 설명과 들어 있는 이미지(원본·마스크)를 보여준다."""
-    num = int(evt.row_value[0])
-    if drv.enabled:
-        drv.pull(num, max_age=120)
-    m, d = _ov_meta(num), os.path.join(SAVE_ROOT, str(num), "fix")
-    names = [ORIGINAL] + [f"{n}_mask.png" for n in EDIT_FILES]
-    items = [(os.path.join(d, n), OV_CAPTION[n]) for n in names if os.path.exists(os.path.join(d, n))]
-    dmg = m.get("damage") or []
-    info = (f"### {num}번 · {m['kind']} 데이터 · 담당 {ASSIGN.get(str(num), '-')}\n"
-            f"- 원본 파일: `{m.get('orig', '?')}` · AI Hub 상태: `{m.get('status') or '-'}`\n"
-            f"- JSON 파손 박스: {', '.join(dmg) if dmg else '없음'}\n"
-            f"- 들어 있는 파일: {', '.join(OV_CAPTION[n] for n in names + ['points.json'] if os.path.exists(os.path.join(d, n))) or '없음'}")
-    return info, items
+def ov_edit(st, evt: gr.SelectData, request: gr.Request):
+    """전체보기 표에서 번호를 누르면 라벨링 탭으로 넘어가 그 번호의 편집 화면을 연다.
+    편집 화면에 저장 안 한 변경이 있으면 넘어가지 않는다 (버려지지 않게)."""
+    num = str(evt.row_value[0])
+    idx = next((i for i in range(N) if _stem(i) == num), None)
+    if idx is None:
+        raise gr.Error(f"{num}번 이미지를 찾을 수 없습니다.")
+    if st and st.get("dirty"):
+        gr.Warning(f"라벨링 화면에 저장하지 않은 변경이 있어 {num}번으로 넘어가지 않았습니다. 먼저 저장하세요.")
+        return (*([gr.skip()] * 7), gr.skip())
+    out = _goto(st, idx, f"전체보기에서 {num}번을 열었습니다.", cmp=False, sid=(st or {}).get("sid") or request.session_hash)
+    return (*out, gr.Tabs(selected="tab_label"))
 
 
 with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_PAGE) as demo:
@@ -1183,11 +1181,12 @@ with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_
     gr.HTML('<div class="app-header"><span class="brand">점자블록 <b>라벨링</b></span><button class="change-who">캐릭터 선택</button>'
             + (f'<span class="meta">{N}장 · {_where}</span></div>' if N else '</div>')
             + ('' if N else f'<div class="notice">이미지를 찾을 수 없습니다: <code>{html.escape(str(SAVE_ROOT))}/&lt;번호&gt;/fix/{ORIGINAL}</code></div>'))
-    with gr.Tab("라벨링") as tab_label:
+    with gr.Tabs() as tabs:
+      with gr.Tab("라벨링", id="tab_label") as tab_label:
         st_label, out_label = build_editor(False)
-    with gr.Tab("파손 비교 (JSON)") as tab_cmp:
+      with gr.Tab("파손 비교 (JSON)", id="tab_cmp") as tab_cmp:
         st_cmp, out_cmp = build_editor(True)
-    with gr.Tab("전체보기") as tab_ov:
+      with gr.Tab("전체보기", id="tab_ov") as tab_ov:
         ov_stats_html = gr.HTML(ov_stats() if N else "")
         with gr.Row():
             ov_kind = gr.Radio(OV_KINDS, value="전체", label="구분 (원래 AI Hub 폴더)", scale=4)
@@ -1198,9 +1197,7 @@ with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_
             ov_next = gr.Button("다음 쪽", scale=0, min_width=110)
             ov_page = gr.Number(value=1, precision=0, show_label=False, container=False, scale=0, min_width=70)
             ov_info = gr.Markdown()
-        ov_table = gr.Dataframe(headers=OV_COLS, value=[], interactive=False, wrap=True, label="번호를 누르면 아래에 이미지가 나옵니다")
-        ov_detail = gr.Markdown("표에서 번호를 누르세요.")
-        ov_gallery = gr.Gallery(label="들어 있는 이미지", columns=3, height="auto", object_fit="contain")
+        ov_table = gr.Dataframe(headers=OV_COLS, value=[], interactive=False, wrap=True, label="번호를 누르면 그 번호의 라벨링 편집 화면으로 넘어갑니다")
     OV_IN, OV_OUT = [ov_kind, ov_state, ov_who, ov_page], [ov_table, ov_info, ov_page, ov_stats_html]
     tab_ov.select(lambda k, s, w, p: ov_go(k, s, w, p), OV_IN, OV_OUT)
     for _c in (ov_kind, ov_state, ov_who):
@@ -1208,7 +1205,7 @@ with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_
     ov_prev.click(lambda k, s, w, p: ov_go(k, s, w, p, -1), OV_IN, OV_OUT)
     ov_next.click(lambda k, s, w, p: ov_go(k, s, w, p, 1), OV_IN, OV_OUT)
     ov_page.submit(lambda k, s, w, p: ov_go(k, s, w, p), OV_IN, OV_OUT)
-    ov_table.select(ov_pick, None, [ov_detail, ov_gallery])
+    ov_table.select(ov_edit, [st_label], out_label + [tabs])
     who_radio.input(pick_who, [who_radio], out_label)
     back_btn.click(go_mine, None, out_label)
     # 탭을 바꿀 때 보던 이미지와 디스크의 최신 저장 내용으로 맞춤
