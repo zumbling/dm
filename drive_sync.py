@@ -21,6 +21,7 @@ import io
 import json
 import os
 import random
+import shutil
 import urllib.request
 import threading
 import time
@@ -261,7 +262,7 @@ def _pull(num):
     _trim_cache(num)
 
 
-CACHE_KEEP = int(os.environ.get("LABELER_CACHE_KEEP", 60))  # 원본 이미지를 캐시에 남겨 둘 최근 번호 수 (디스크 절약)
+CACHE_KEEP = int(os.environ.get("LABELER_CACHE_KEEP", 20))  # 원본 이미지를 캐시에 남겨 둘 최근 번호 수 (디스크 절약)
 _recent = []
 
 
@@ -274,10 +275,10 @@ def _trim_cache(num):
         old = _recent.pop(0)
         if _pending.get(old):
             continue
-        try:
-            os.remove(os.path.join(CACHE, str(old), "fix", "original.jpeg"))
-        except OSError:
-            pass
+        with lock(old):  # 오래된 번호는 폴더째 지운다 (Drive 에 원본이 있으니 다시 보면 또 받는다)
+            if not _pending.get(old):
+                shutil.rmtree(os.path.join(CACHE, str(old)), ignore_errors=True)
+                _pulled.pop(old, None)
 
 
 def _push(num, names, removed):

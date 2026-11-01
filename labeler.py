@@ -98,7 +98,7 @@ if drv.enabled:
     ALL_FILES = [os.path.join(SAVE_ROOT, str(n), "fix", ORIGINAL) for n in _nums]
     N = len(ALL_FILES)
 
-REFRESH_SEC = int(os.environ.get("LABELER_REFRESH", 120))  # Drive 완료 목록을 다시 읽는 주기 (초)
+REFRESH_SEC = int(os.environ.get("LABELER_REFRESH", 180))  # Drive 완료 목록을 다시 읽는 주기 (초)
 _refresh = {"t": time.time(), "lock": threading.Lock()}
 
 
@@ -380,7 +380,7 @@ def ds_new(idx, cmp=False, sid=None):
     # visited: 거쳐 간 단계. 이미 마스크가 저장된 단계는 거친 것으로 본다 (기존 데이터는 그대로 완료 유지).
     visited = sorted({first} | {s for s, n in enumerate(EDIT_FILES)
                                 if os.path.exists(os.path.join(_fix_dir(idx), f"{n}_mask.png"))})
-    st = {"idx": idx, "step": first, "tool": 0, "sel": None, "dirty": False, "touched": [],
+    st = {"idx": idx, "step": first, "tool": 0, "sel": None, "dirty": False, "touched": [], "t": time.time(),
           "locked": locked, "cmp": cmp, "data": data, "visited": visited, "sid": sid}
     _claim(st)
     return st
@@ -1121,8 +1121,8 @@ def build_editor(cmp=False):
 
 def ds_sync(src, dst, cmp):
     """탭을 열면 다른 탭이 보던 이미지로 맞춘다 (이 탭에 저장 안 한 변경이 있으면 그대로 둔다)."""
-    if src is None or (dst is not None and dst["dirty"]):
-        return (gr.skip(),) * 7
+    if src is None or (dst is not None and (dst["dirty"] or dst.get("t", 0) >= src.get("t", 0))):
+        return (gr.skip(),) * 7  # 이 탭이 더 최근에 연 이미지면 그대로 둔다 (전체보기에서 번호를 눌러 넘어온 경우 등)
     return _goto(None, src["idx"], cmp=cmp, sid=src.get("sid"))
 
 # ====================================================================================
@@ -1211,7 +1211,8 @@ def ov_edit(st, evt: gr.SelectData, request: gr.Request):
     return (*out, gr.Tabs(selected="tab_label"))
 
 
-with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_PAGE) as demo:
+# delete_cache: 화면에 보낸 이미지 임시 파일을 10분마다, 30분 지난 것부터 지운다 (Render 디스크에 쌓이지 않게)
+with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_PAGE, delete_cache=(600, 1800)) as demo:
     _where = "Google Drive 연동" if drv.enabled else html.escape(str(SAVE_ROOT))
     who_radio = gr.Radio(PEOPLE, value=None, elem_id="who_radio", show_label=False)  # 숨김: 브라우저가 고른 캐릭터를 서버에 알림
     back_btn = gr.Button("내 담당으로", elem_id="back_btn")  # 숨김: 경고창의 '내 담당으로 돌아가기'
