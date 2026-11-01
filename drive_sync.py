@@ -20,6 +20,7 @@ import base64
 import io
 import json
 import os
+import random
 import urllib.request
 import threading
 import time
@@ -94,11 +95,28 @@ def _svc():
     return _local.svc
 
 
+RETRIES = int(os.environ.get("LABELER_RETRIES", 6))
+
+
+def _retry(fn, what=""):
+    """Drive/Apps Script 호출을 재시도한다 (429·5xx·연결 끊김 → 1, 2, 4, 8 … 초 + 랜덤 대기, exponential backoff).
+    권한·없는 파일 같은 4xx 는 바로 실패시킨다."""
+    for k in range(RETRIES):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            status = getattr(getattr(e, "resp", None), "status", None) or getattr(e, "code", None)
+            retryable = status is None or int(status) in (403, 408, 429, 500, 502, 503, 504)
+            if not retryable or k == RETRIES - 1:
+                raise
+            time.sleep(min(60, 2 ** k) + random.random())
+
+
 def _list(q, fields):
     out, tok = [], None
     while True:
-        r = _svc().files().list(q=q, fields=f"nextPageToken, files({fields})", pageSize=1000, pageToken=tok,
-                                supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        r = _retry(lambda: _svc().files().list(q=q, fields=f"nextPageToken, files({fields})", pageSize=1000, pageToken=tok,
+                                               supportsAllDrives=True, includeItemsFromAllDrives=True).execute())
         out += r["files"]
         tok = r.get("nextPageToken")
         if not tok:
@@ -109,8 +127,10 @@ def _gas(action, **kw):
     """Apps Script 웹앱 호출 (POST 는 302 로 결과 주소에 넘어가고 urllib 이 따라간다)."""
     req = urllib.request.Request(GAS_URL, data=json.dumps({"key": GAS_KEY, "action": action, **kw}).encode(),
                                  headers={"Content-Type": "text/plain"})
-    with urllib.request.urlopen(req, timeout=300) as r:
-        res = json.loads(r.read().decode())
+    def call():
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return json.loads(r.read().decode())
+    res = _retry(call)
     if res.get("error"):
         raise RuntimeError(res["error"])
     return res
@@ -198,7 +218,13 @@ def _pull(num):
     started = time.time()
     if GAS_URL:
         res = _gas("pull", num=num, orig=not os.path.exists(os.path.join(dst, "original.jpeg")))
-        got, remote = [(f["name"], base64.b64decode(f["b64"])) for f in res["files"]], set(res["names"])
+        remote, got = set(res["names"]), []
+        for f in res.pop("files"):  # 받은 즉시 디스크(.part)에 쓰고 메모리에서 버린다
+            tmp = os.path.join(dst, f["name"] + ".dl")
+            with open(tmp, "wb") as fh:
+                fh.write(base64.b64decode(f.pop("b64")))
+            got.append((f["name"], tmp))
+        del res
     else:
         from googleapiclient.http import MediaIoBaseDownload
         fid = fix_ids.get(num)
@@ -212,18 +238,42 @@ def _pull(num):
             p = os.path.join(dst, f["name"])
             if f["name"] == "original.jpeg" and os.path.exists(p) and os.path.getsize(p) == int(f.get("size", -1)):
                 continue
-            buf = io.BytesIO()
-            dl, ok = MediaIoBaseDownload(buf, _svc().files().get_media(fileId=f["id"], supportsAllDrives=True)), False
-            while not ok:
-                _, ok = dl.next_chunk()
-            got.append((f["name"], buf.getvalue()))
+            tmp = p + ".dl"  # 메모리 대신 디스크로 스트리밍 (큰 원본 이미지도 메모리를 거의 안 씀)
+            with open(tmp, "wb") as fh:
+                dl, ok = MediaIoBaseDownload(fh, _svc().files().get_media(fileId=f["id"], supportsAllDrives=True),
+                                             chunksize=1024 * 1024), False
+                while not ok:
+                    _, ok = _retry(dl.next_chunk)
+            got.append((f["name"], tmp))
     with lock(num):
         local_newer = _pending.get(num) or _saved.get(num, 0) >= started
-        for name, data in got:
+        for name, tmp in got:
             if name == "original.jpeg" or not local_newer:
-                write_file(os.path.join(dst, name), data)
+                os.replace(tmp, os.path.join(dst, name))
+            else:
+                os.remove(tmp)
         if not local_newer:
             _cleanup(dst, remote)  # 다른 곳에서 지워진 마스크가 캐시에 남아 있지 않게 정리
+    _trim_cache(num)
+
+
+CACHE_KEEP = int(os.environ.get("LABELER_CACHE_KEEP", 60))  # 원본 이미지를 캐시에 남겨 둘 최근 번호 수 (디스크 절약)
+_recent = []
+
+
+def _trim_cache(num):
+    """최근에 본 CACHE_KEEP 개 번호만 원본(original.jpeg)을 남기고 나머지는 지운다. 다시 보면 또 받는다."""
+    if num in _recent:
+        _recent.remove(num)
+    _recent.append(num)
+    while len(_recent) > CACHE_KEEP:
+        old = _recent.pop(0)
+        if _pending.get(old):
+            continue
+        try:
+            os.remove(os.path.join(CACHE, str(old), "fix", "original.jpeg"))
+        except OSError:
+            pass
 
 
 def _push(num, names, removed):
@@ -232,6 +282,7 @@ def _push(num, names, removed):
             files = [{"name": n, "b64": base64.b64encode(open(os.path.join(CACHE, str(num), "fix", n), "rb").read()).decode()}
                      for n in names]
             _gas("push", num=num, files=files, removed=removed)
+            del files
             return
         from googleapiclient.http import MediaFileUpload
         fid = fix_ids.get(num)
@@ -246,13 +297,13 @@ def _push(num, names, removed):
         for n in names:
             media = MediaFileUpload(os.path.join(CACHE, str(num), "fix", n), resumable=False)
             if n in exist:
-                _svc().files().update(fileId=exist[n], media_body=media, supportsAllDrives=True).execute()
+                _retry(lambda: _svc().files().update(fileId=exist[n], media_body=media, supportsAllDrives=True).execute())
             else:
-                _svc().files().create(body={"name": n, "parents": [fid]}, media_body=media,
-                                      supportsAllDrives=True).execute()
+                _retry(lambda: _svc().files().create(body={"name": n, "parents": [fid]}, media_body=media,
+                                                     supportsAllDrives=True).execute())
         for n in removed:
             if n in exist:
-                _svc().files().delete(fileId=exist[n], supportsAllDrives=True).execute()
+                _retry(lambda: _svc().files().delete(fileId=exist[n], supportsAllDrives=True).execute())
     except Exception as e:  # 백그라운드라서 화면에 직접 못 띄우므로 모아 둔다
         errors.append(f"{num}번 업로드 실패: {e}")
     finally:
