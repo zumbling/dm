@@ -98,6 +98,39 @@ if drv.enabled:
     ALL_FILES = [os.path.join(SAVE_ROOT, str(n), "fix", ORIGINAL) for n in _nums]
     N = len(ALL_FILES)
 
+REFRESH_SEC = int(os.environ.get("LABELER_REFRESH", 120))  # Drive 완료 목록을 다시 읽는 주기 (초)
+_refresh = {"t": time.time(), "lock": threading.Lock()}
+
+
+def refresh_done(force=False):
+    """Drive 의 최신 완료 목록을 다시 읽어 DONE 에 반영한다 (다른 사람·다른 서버가 저장한 것 포함).
+    REFRESH_SEC 안에 이미 읽었으면 건너뛴다. 실패하면 기존 목록을 그대로 쓴다."""
+    if not drv.enabled or (not force and time.time() - _refresh["t"] < REFRESH_SEC):
+        return
+    if not _refresh["lock"].acquire(blocking=False):
+        return  # 이미 다른 요청이 읽는 중
+    try:
+        _, done = drv.index(REQUIRED_PNGS, extra=[f"{n}_mask.png" for n in EDIT_FILES] + ["points.json"], any_of=ONE_OF_PNGS)
+        pending = {n for n, c in drv._pending.items() if c}  # 이 서버가 아직 올리는 중인 번호는 로컬 판단 유지
+        keep = {n for n in DONE if n in pending}
+        DONE.clear()
+        DONE.update((done - pending) | keep)
+        _refresh["t"] = time.time()
+    except Exception as e:  # noqa: BLE001
+        print(f"[Drive 갱신 실패] {e}")
+    finally:
+        _refresh["lock"].release()
+
+
+def _refresh_loop():
+    while True:
+        time.sleep(REFRESH_SEC)
+        refresh_done(force=True)
+
+
+if drv.enabled:
+    threading.Thread(target=_refresh_loop, daemon=True).start()
+
 
 def edit_scale(image):
     """원본 -> 편집 화면 표시 이미지의 배율 (1 이하). 점 좌표는 항상 원본 기준으로 저장한다."""
@@ -1139,7 +1172,10 @@ def ov_stats():
 
 
 def ov_go(kind, state, who, page, delta=0, reset=False):
-    """필터를 적용해 page(+delta) 쪽을 표로 만든다. 반환: 표, 안내 문구, 현재 쪽, 담당자별 완료율."""
+    """필터를 적용해 page(+delta) 쪽을 표로 만든다. 반환: 표, 안내 문구, 현재 쪽, 담당자별 완료율.
+    Drive 모드에서는 완료 목록을 REFRESH_SEC 마다 자동으로, 탭을 열 때는 뒤에서 다시 읽는다 ('드라이브 최신화' 버튼은 즉시)."""
+    if drv.enabled and time.time() - _refresh["t"] > 30:
+        threading.Thread(target=refresh_done, kwargs={"force": True}, daemon=True).start()  # 기다리지 않고 뒤에서 최신화
     nums = {int(_stem(i)): i for i in range(N)}
     rows_n = [n for n in sorted(nums)
               if (kind == "전체" or _ov_meta(n)["kind"] == kind)
@@ -1157,7 +1193,8 @@ def ov_go(kind, state, who, page, delta=0, reset=False):
                      " ".join(EDIT_SHORT[i] for i, e in enumerate(EDIT_FILES) if f"{e}_mask.png" in files) or "-"])
     if not OVERVIEW:
         gr.Warning("overview.json 이 없어 구분·파손 박스를 알 수 없습니다 (build_overview.py 로 만들어 두세요).")
-    return rows, f"조건에 맞는 번호 {len(rows_n)}개 · {page} / {pages} 쪽", page, ov_stats()
+    when = f" · 드라이브 기준 {time.strftime('%H:%M:%S', time.localtime(_refresh['t']))}" if drv.enabled else ""
+    return rows, f"조건에 맞는 번호 {len(rows_n)}개 · {page} / {pages} 쪽{when}", page, ov_stats()
 
 
 def ov_edit(st, evt: gr.SelectData, request: gr.Request):
@@ -1197,6 +1234,7 @@ with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_
             ov_next = gr.Button("다음 쪽", scale=0, min_width=110)
             ov_page = gr.Number(value=1, precision=0, show_label=False, container=False, scale=0, min_width=70)
             ov_info = gr.Markdown()
+            ov_sync = gr.Button("드라이브 최신화", scale=0, min_width=130, visible=drv.enabled)
         ov_table = gr.Dataframe(headers=OV_COLS, value=[], interactive=False, wrap=True, label="번호를 누르면 그 번호의 라벨링 편집 화면으로 넘어갑니다")
     OV_IN, OV_OUT = [ov_kind, ov_state, ov_who, ov_page], [ov_table, ov_info, ov_page, ov_stats_html]
     tab_ov.select(lambda k, s, w, p: ov_go(k, s, w, p), OV_IN, OV_OUT)
@@ -1205,6 +1243,11 @@ with gr.Blocks(title="점자블록 라벨링", theme=THEME, css=PAGE_CSS, js=JS_
     ov_prev.click(lambda k, s, w, p: ov_go(k, s, w, p, -1), OV_IN, OV_OUT)
     ov_next.click(lambda k, s, w, p: ov_go(k, s, w, p, 1), OV_IN, OV_OUT)
     ov_page.submit(lambda k, s, w, p: ov_go(k, s, w, p), OV_IN, OV_OUT)
+
+    def _sync(k, s, w, p):
+        refresh_done(force=True)  # Drive 를 지금 다시 읽는다 (30초 안팎 걸림)
+        return ov_go(k, s, w, p)
+    ov_sync.click(_sync, OV_IN, OV_OUT)
     ov_table.select(ov_edit, [st_label], out_label + [tabs])
     who_radio.input(pick_who, [who_radio], out_label)
     back_btn.click(go_mine, None, out_label)

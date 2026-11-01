@@ -162,12 +162,12 @@ def index(required, extra=(), any_of=()):
     num_of = {f["id"]: int(f["name"]) for f in
               _list(f"'{ROOT_ID}' in parents and mimeType='{FOLDER}' and trashed=false", "id,name")
               if f["name"].isdigit()}
-    fix_ids.clear()
+    new_ids = {}  # 다 만든 뒤 한 번에 바꾼다 (백그라운드 갱신 중에 화면이 빈 목록을 보지 않게)
     for f in _list(f"name='fix' and mimeType='{FOLDER}' and trashed=false", "id,parents"):
         n = num_of.get((f.get("parents") or [None])[0])
         if n is not None:
-            fix_ids.setdefault(n, f["id"])
-    num_of_fix = {fid: n for n, fid in fix_ids.items()}
+            new_ids.setdefault(n, f["id"])
+    num_of_fix = {fid: n for n, fid in new_ids.items()}
 
     have = {num_of_fix[p] for f in _list("name='original.jpeg' and trashed=false", "parents")
             for p in f.get("parents", []) if p in num_of_fix}
@@ -178,9 +178,13 @@ def index(required, extra=(), any_of=()):
             if p in num_of_fix:
                 cnt.setdefault(num_of_fix[p], set()).add(f["name"])
     done = {n for n, s in cnt.items() if set(required) <= s and (not any_of or any(a in s for a in any_of))}
-    present.clear()
-    for n in have:
-        present[n] = {"original.jpeg"} | cnt.get(n, set())
+    new_present = {n: {"original.jpeg"} | cnt.get(n, set()) for n in have}
+    fix_ids.update(new_ids)
+    for n in [n for n in fix_ids if n not in new_ids]:
+        del fix_ids[n]
+    present.update(new_present)
+    for n in [n for n in present if n not in new_present]:
+        del present[n]
     return sorted(n for n in have if _in_range(n)), done
 
 
