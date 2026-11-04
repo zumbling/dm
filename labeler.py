@@ -826,6 +826,23 @@ def ds_jump(st, n, dirty=False, save=False):
     return _goto(st, idx, msg, cmp=st.get("cmp", False))
 
 
+def ds_bookmark(st):
+    """현재 이미지 번호를 북마크로 (브라우저가 받아서 사람별로 1개 저장)."""
+    _need_state(st)
+    num = _stem(st["idx"])
+    gr.Info(f"🔖 {num}번을 북마크했습니다. 다음에 접속하면 여기서 시작합니다 (사람당 1개, 새로 찍으면 바뀜).")
+    return num
+
+
+def ds_goto_bookmark(st, n, dirty=False, save=False):
+    """북마크한 번호로 이동 (완료된 이미지여도 이동)."""
+    if not str(n or "").strip().isdigit():
+        gr.Warning("북마크가 없습니다. 원하는 이미지에서 '🔖 북마크' 를 먼저 누르세요.")
+        _need_state(st)
+        return _ds_out(copy.deepcopy(st))
+    return ds_jump(st, int(n), dirty, save)
+
+
 def ds_save(st):
     _need_state(st)
     st = copy.deepcopy(st)
@@ -1044,6 +1061,11 @@ _ASK = "d ? confirm('현재까지의 상태를 저장하시겠습니까?\\n\\n[�
 JS_ASK_NAV = "(s, d, f) => [s, d, " + _ASK % ("이동", "이동") + "]"
 JS_ASK_JUMP = "(s, n, d, f) => [s, n, d, " + _ASK % ("이동", "이동") + "]"
 JS_ASK_STEP = "(s, d, f) => [s, d, " + _ASK % ("다음 단계로", "다음 단계로") + "]"
+# 북마크: 브라우저 localStorage 에 캐릭터(사람)별로 1개 ('labeler_bm_<이름>'). 새로 접속하면 완료 여부와 상관없이 북마크에서 시작.
+_BM_KEY = "('labeler_bm_' + (localStorage.getItem('labeler_who') || ''))"
+JS_SET_BM = "(n) => { if (n) localStorage.setItem(" + _BM_KEY + ", n); return []; }"
+JS_GO_BM = "(s, n, d, f) => [s, localStorage.getItem(" + _BM_KEY + ") || '', d, " + _ASK % ("이동", "이동") + "]"
+JS_LOAD_BM = "(w, b) => [localStorage.getItem('labeler_who') || w, localStorage.getItem(" + _BM_KEY + ") || '']"
 
 
 def build_editor(cmp=False):
@@ -1070,6 +1092,10 @@ def build_editor(cmp=False):
         ds_jump_n = gr.Number(value=1, precision=0, minimum=1, maximum=max(N, 1), show_label=False, container=False,
                               min_width=80, scale=1)
         ds_jump_btn = gr.Button("번호로 이동", scale=2)
+        if not cmp:
+            ds_bm_btn = gr.Button("🔖 북마크", scale=1, min_width=90)
+            ds_bm_go_btn = gr.Button("북마크로 이동", scale=1, min_width=110)
+    ds_bm_num = gr.Textbox(visible=False)  # 북마크 번호 (브라우저 localStorage 와 주고받기용)
     with gr.Row():
         ds_step = gr.Radio([EDIT_STEPS[1]] if cmp else EDIT_STEPS, value=EDIT_STEPS[1 if cmp else 0], label="단계", scale=5)
         ds_tool = gr.Radio(EDIT_TOOLS, value=EDIT_TOOLS[0], label="도구", scale=3)
@@ -1096,11 +1122,15 @@ def build_editor(cmp=False):
 
     DS_OUT = [ds_canvas, ds_state, ds_msg, ds_head_md, ds_step, ds_tool, ds_dirty]
     quiet = dict(show_progress="hidden", trigger_mode="multiple")  # 클릭마다 로딩 표시 없음, 빠른 연속 클릭도 모두 처리
-    def init(who, request: gr.Request):
+    def init(who, bm, request: gr.Request):
         if who:
             _WHO[request.session_hash] = who  # 브라우저에 기억해 둔 캐릭터 (localStorage)
+        bm = str(bm or "").strip()
+        if not cmp and bm.isdigit() and 1 <= int(bm) <= N:  # 북마크가 있으면 완료 여부와 상관없이 거기서 시작
+            _need_images()
+            return _goto(None, int(bm) - 1, f"🔖 북마크 {bm}번에서 시작합니다.", cmp=False, sid=request.session_hash)
         return ds_init(cmp, request.session_hash)
-    demo.load(init, [who_radio], DS_OUT, js="(w) => [localStorage.getItem('labeler_who') || w]")
+    demo.load(init, [who_radio, ds_bm_num], DS_OUT, js=JS_LOAD_BM)
     ds_canvas.select(ds_click, [ds_state], DS_OUT, **quiet)
     ds_step.input(ds_set_step, [ds_state, ds_step], DS_OUT, **quiet)
     ds_tool.input(ds_set_tool, [ds_state, ds_tool], DS_OUT, **quiet)
@@ -1114,6 +1144,9 @@ def build_editor(cmp=False):
     ds_prev_btn.click(ds_prev, [ds_state, ds_dirty, ds_save_flag], DS_OUT, js=JS_ASK_NAV)
     ds_next_btn.click(ds_next, [ds_state, ds_dirty, ds_save_flag], DS_OUT, js=JS_ASK_NAV)
     ds_jump_btn.click(ds_jump, [ds_state, ds_jump_n, ds_dirty, ds_save_flag], DS_OUT, js=JS_ASK_JUMP)
+    if not cmp:
+        ds_bm_btn.click(ds_bookmark, [ds_state], ds_bm_num, **quiet).then(None, [ds_bm_num], None, js=JS_SET_BM)
+        ds_bm_go_btn.click(ds_goto_bookmark, [ds_state, ds_bm_num, ds_dirty, ds_save_flag], DS_OUT, js=JS_GO_BM)
     ds_save_btn.click(ds_save, [ds_state], [ds_state, ds_head_md, ds_save_msg, ds_dirty])
     ds_save_next_btn.click(ds_save_next, [ds_state], DS_OUT + [ds_save_msg])
     return ds_state, DS_OUT
